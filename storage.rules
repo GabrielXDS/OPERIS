@@ -1,0 +1,7 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Only backend-issued short-lived signed URLs grant object access.
+    match /{path=**} { allow read, write: if false; }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "functions": [
+    {
+      "source": "backend",
+      "codebase": "default",
+      "runtime": "nodejs22"
+    }
+  ],
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  },
+  "emulators": {
+    "auth": {
+      "port": 9099
+    },
+    "firestore": {
+      "port": 8080
+    },
+    "functions": {
+      "port": 5001
+    }
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}

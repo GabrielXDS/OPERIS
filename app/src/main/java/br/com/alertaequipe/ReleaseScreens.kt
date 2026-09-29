@@ -1,0 +1,286 @@
+package br.com.alertaequipe
+
+import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
+import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import java.io.File
+
+/** Snapshot of the ongoing APK download/install state shown by both update UIs. */
+data class UpdateUiState(
+    val downloading: Boolean = false,
+    val downloaded: Boolean = false,
+    val verified: Boolean = false,
+    val error: String? = null
+)
+
+/** Identidade lida do próprio APK baixado (pacote e versão, sem instalar). */
+data class ApkInspect(val packageName: String, val versionCode: Int)
+
+/** Download, SHA-256 validation and install plumbing (pure logic kept testable). */
+object UpdateFlow {
+    fun apkFileName(versionName: String): String = "OPERIS-${versionName}.apk"
+        .replace(Regex("[^A-Za-z0-9._-]"), "_")
+    fun sha256(file: File): String? = runCatching {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(64 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }.getOrNull()
+    fun verified(expected: String?, file: File): Boolean {
+        if (expected == null || expected.length != 64) return false
+        return expected == sha256(file)
+    }
+    /** Triple check do pacote candidato: mesmo app, versão NOVA (maior que a instalada). */
+    fun installable(pkg: String?, apkVersionCode: Int, expectedPackage: String, installedVersionCode: Int): Boolean =
+        pkg == expectedPackage && apkVersionCode > installedVersionCode
+    /** Lê packageName/versionCode do APK baixado através do PackageManager (sem instalar). */
+    @Suppress("DEPRECATION")
+    fun inspect(context: Context, file: File): ApkInspect? = runCatching {
+        val info = context.packageManager.getPackageArchiveInfo(file.absolutePath, 0) ?: return null
+        val pkg = info.applicationInfo?.packageName ?: info.packageName
+        val version = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode.toInt() else info.versionCode
+        ApkInspect(pkg, version)
+    }.getOrNull()
+    fun formatApkSize(bytes: Long): String = when {
+        bytes >= 1_048_576 -> String.format(java.util.Locale.ROOT, "%.1f MB", bytes / 1_048_576.0)
+        bytes >= 1024 -> "%.0f KB".format(bytes / 1024.0)
+        else -> "$bytes B"
+    }
+    fun enqueue(context: Context, url: String, versionName: String): Long {
+        val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val request = DownloadManager.Request(Uri.parse(url))
+            .setTitle("OPERIS $versionName")
+            .setDescription("Baixando a atualização do OPERIS")
+            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+            .setMimeType("application/vnd.android.package-archive")
+            .setDestinationInExternalFilesDir(context, null, apkFileName(versionName))
+        return manager.enqueue(request)
+    }
+    fun downloadedFile(context: Context, versionName: String): File =
+        File(context.getExternalFilesDir(null), apkFileName(versionName))
+    fun queryStatus(context: Context, downloadId: Long): Int {
+        val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        val cursor = manager.query(DownloadManager.Query().setFilterById(downloadId))
+        return cursor.use {
+            if (cursor.moveToFirst()) cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+            else DownloadManager.STATUS_FAILED
+        }
+    }
+    fun canInstall(context: Context): Boolean = context.packageManager.canRequestPackageInstalls()
+    fun openUnknownSources(context: Context) {
+        runCatching {
+            context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + context.packageName)))
+        }
+    }
+    fun install(context: Context, file: File): Boolean =
+        canInstall(context) && UpdatePackageInstaller.install(context, file)
+}
+
+@Composable
+internal fun RequiredUpdateScreen(
+    installedVersionName: String,
+    policy: ReleasePolicy,
+    state: UpdateUiState,
+    onUpdate: () -> Unit
+) {
+    val published = policy.canDownload()
+    val context = LocalContext.current
+    val canInstall = remember(context) { UpdateFlow.canInstall(context) }
+    Column(
+        Modifier.fillMaxSize().background(AppInk).statusBarsPadding().navigationBarsPadding().widthIn(max = 480.dp).fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Spacer(Modifier.height(64.dp))
+        Text("ATUALIZAÇÃO\nNECESSÁRIA", fontSize = 26.sp, fontWeight = FontWeight.Black,
+            textAlign = TextAlign.Center, color = AppRed, letterSpacing = 1.sp)
+        Spacer(Modifier.height(18.dp))
+        Text("Esta versão do OPERIS não é mais suportada pelo serviço.",
+            fontSize = 15.sp, textAlign = TextAlign.Center, color = MaterialTheme.colorScheme.onBackground)
+        Spacer(Modifier.height(24.dp))
+        Column(Modifier.fillMaxWidth()) {
+            ReleaseLine("Instalada", installedVersionName)
+            ReleaseLine("Mínima necessária", "Código de versão ${policy.minSupportedVersionCode}")
+            ReleaseLine("Disponível", policy.latestVersionName)
+            policy.apkSize?.let { ReleaseLine("Tamanho", UpdateFlow.formatApkSize(it)) }
+        }
+        Spacer(Modifier.height(20.dp))
+        Text("NOVIDADES", color = AppMuted, fontSize = 11.sp, letterSpacing = 1.4.sp)
+        Spacer(Modifier.height(8.dp))
+        Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            policy.releaseNotes.forEach { note ->
+                Text("• $note", color = MaterialTheme.colorScheme.onBackground, fontSize = 14.sp,
+                    modifier = Modifier.padding(vertical = 3.dp))
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        if (!published) {
+            Text("O pacote de atualização ainda não foi publicado. Tente novamente mais tarde.",
+                color = AppMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
+        } else if (state.error != null) {
+            Text(state.error, color = AppRed, fontSize = 13.sp, textAlign = TextAlign.Center)
+        } else if (state.downloading) {
+            Text("Baixando a nova versão…", color = AppMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
+        } else if (state.downloaded && state.verified) {
+            Text("Download concluído. Confirme a instalação.", color = AppMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
+        }
+        Spacer(Modifier.height(14.dp))
+        Button(
+            onClick = onUpdate,
+            enabled = if (state.downloading) false else published && !(state.downloaded && !state.verified),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Text(
+                when {
+                    state.downloading -> "BAIXANDO…"
+                    state.downloaded && state.verified -> "INSTALAR"
+                    else -> "ATUALIZAR AGORA"
+                },
+                fontSize = 17.sp, fontWeight = FontWeight.Bold
+            )
+        }
+        if (published && !canInstall) {
+            Spacer(Modifier.height(10.dp))
+            Text("Para instalar, habilite esta fonte nas configurações do aparelho.",
+                color = AppMuted, fontSize = 12.sp, textAlign = TextAlign.Center)
+        }
+        Spacer(Modifier.height(28.dp))
+    }
+}
+
+@Composable
+internal fun OptionalUpdateDialog(
+    installedVersionName: String,
+    policy: ReleasePolicy,
+    state: UpdateUiState,
+    onUpdate: () -> Unit,
+    onLater: () -> Unit
+) {
+    val published = policy.canDownload()
+    val context = LocalContext.current
+    val canInstall = remember(context) { UpdateFlow.canInstall(context) }
+    AlertDialog(
+        onDismissRequest = onLater,
+        title = { Text("NOVA VERSÃO DISPONÍVEL") },
+        text = {
+            Column {
+                Text("Você usa o OPERIS $installedVersionName. A versão ${policy.latestVersionName} já está disponível.",
+                    color = MaterialTheme.colorScheme.onSurface)
+                policy.apkSize?.let {
+                    Text("Tamanho do pacote: ${UpdateFlow.formatApkSize(it)}", color = AppMuted, fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp))
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("NOVIDADES", color = AppMuted, fontSize = 11.sp, letterSpacing = 1.4.sp)
+                policy.releaseNotes.forEach { note ->
+                    Text("• $note", fontSize = 14.sp, modifier = Modifier.padding(vertical = 2.dp))
+                }
+                if (!published) Text("O pacote de atualização ainda não foi publicado.",
+                    color = AppMuted, fontSize = 13.sp)
+                if (state.error != null) Text(state.error, color = AppRed, fontSize = 13.sp)
+                if (state.downloading) Text("Baixando a nova versão…", color = AppMuted, fontSize = 13.sp)
+                if (state.downloaded && state.verified) Text("Download concluído. Confirme a instalação.",
+                    color = AppMuted, fontSize = 13.sp)
+                if (published && !canInstall) Text("Para instalar, habilite esta fonte nas configurações do aparelho.",
+                    color = AppMuted, fontSize = 12.sp)
+            }
+        },
+        dismissButton = { TextButton(onClick = { if (!state.downloading) onLater() }) { Text("AGORA NÃO") } },
+        confirmButton = {
+            Button(
+                onClick = onUpdate,
+                enabled = !state.downloading && published && !(state.downloaded && !state.verified)
+            ) {
+                Text(
+                    when {
+                        state.downloading -> "BAIXANDO…"
+                        state.downloaded && state.verified -> "INSTALAR"
+                        else -> "ATUALIZAR"
+                    }
+                )
+            }
+        }
+    )
+}
+
+@Composable
+private fun ReleaseLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 5.dp)) {
+        Text(label, color = AppMuted, fontSize = 14.sp, modifier = Modifier.width(140.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(value, color = MaterialTheme.colorScheme.onBackground, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+/** Registers a one-shot download-complete bridge per pending download id. */
+@Composable
+internal fun DownloadCompletionMonitor(
+    downloadId: Long?,
+    onComplete: (id: Long) -> Unit
+) {
+    val context = LocalContext.current
+    DisposableEffect(downloadId) {
+        if (downloadId == null) return@DisposableEffect onDispose {}
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == DownloadManager.ACTION_DOWNLOAD_COMPLETE &&
+                    intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) == downloadId
+                ) onComplete(downloadId)
+            }
+        }
+        val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
+        onDispose { runCatching { context.unregisterReceiver(receiver) } }
+    }
+}

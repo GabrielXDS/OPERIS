@@ -1,0 +1,25 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+**/node_modules/
+app/google-services.json
+*.jks
+*.keystore
+.env*
+.firebase/
+*-debug.log
+
+
+## OPERIS local/sensitive artifacts
+backend/src/ptt-secrets.js
+backup/
+work/
+*.log
+*.apk
+*.bak
+*.pre-shifts
+*.v43tmp
+*.zip
+patch_*.js
+backend/tmp-*.mjs

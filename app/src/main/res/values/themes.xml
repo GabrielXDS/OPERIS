@@ -1,0 +1,11 @@
+<resources>
+    <style name="Theme.Operis.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/operis_ink</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_splash_symbol</item>
+        <item name="windowSplashScreenIconBackgroundColor">@color/operis_ink</item>
+        <item name="postSplashScreenTheme">@style/Theme.Operis.App</item>
+    </style>
+    <style name="Theme.Operis.App" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/operis_ink</item>
+    </style>
+</resources>

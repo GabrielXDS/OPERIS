@@ -1,0 +1,11 @@
+{
+  "functions": {
+    "source": ".",
+    "runtime": "nodejs22",
+    "ignore": ["node_modules", ".git", "test", "scripts", "*.log"],
+    "predeploy": ["npm run check"]
+  },
+  "firestore": {
+    "indexes": "firestore.indexes.json"
+  }
+}
