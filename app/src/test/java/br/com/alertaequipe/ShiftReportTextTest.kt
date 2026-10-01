@@ -43,4 +43,11 @@ class ShiftReportTextTest {
         val text = ShiftReportText.full(report, "Equipe Delta")
         assertTrue(text.contains("Brigadista intermediária: Roberta"))
     }
+    @Test fun activeShiftIsSharedAsPartialReport() {
+        val active = shift(emptyList()).copy(status = "ACTIVE", endedAt = null, closingNotes = "", nextTeam = "")
+        val text = ShiftReportText.full(ShiftReport(active, emptyList(), 0, 0), "Equipe Delta")
+        assertTrue(text.contains("RELATÓRIO PARCIAL"))
+        assertTrue(text.contains("Plantão em andamento"))
+    }
+
 }

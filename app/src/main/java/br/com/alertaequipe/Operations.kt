@@ -6,11 +6,34 @@ data class MemberStatus(val uid: String, val name: String, val role: String, val
     val operationalFunction: String = "", val pauseReason: String?, val lastSeenAt: Long?, val appReady: Boolean, val appVersion: String?)
 data class TeamInvite(val code: String, val active: Boolean, val expiresAt: Long?)
 data class EmergencyContact(val id: String, val name: String, val phone: String)
+
+data class TeamShiftSchedule(
+    val mode: String = "12X36", val startTime: String = "19:00", val endTime: String = "07:00",
+    val workHours: Int = 12, val restHours: Int = 36, val timeZone: String = "America/Sao_Paulo"
+) {
+    companion object {
+        val DEFAULT = TeamShiftSchedule()
+        fun calculatedEnd(startTime: String): String? {
+            val parts=startTime.trim().split(":"); if(parts.size!=2)return null
+            val hour=parts[0].toIntOrNull()?:return null; val minute=parts[1].toIntOrNull()?:return null
+            if(hour !in 0..23 || minute !in 0..59)return null
+            val total=(hour*60+minute+12*60)%(24*60)
+            return "%02d:%02d".format(total/60,total%60)
+        }
+        fun fromMap(value: Any?): TeamShiftSchedule {
+            val m=value as? Map<*,*> ?: return DEFAULT
+            val start=m["startTime"] as? String ?: DEFAULT.startTime
+            val end=calculatedEnd(start) ?: DEFAULT.endTime
+            return TeamShiftSchedule("12X36",start,end,12,36,m["timeZone"] as? String ?: DEFAULT.timeZone)
+        }
+    }
+}
 data class TeamDetails(val teamId: String, val name: String, val myRole: String,
     val total: Int, val online: Int, val paused: Int, val offline: Int, val ready: Int,
     val members: List<MemberStatus>, val invite: TeamInvite?, val serverNow: Long,
     val requests: List<MembershipRequest> = emptyList(),
-    val emergencyContacts: List<EmergencyContact> = emptyList())
+    val emergencyContacts: List<EmergencyContact> = emptyList(),
+    val shiftSchedule: TeamShiftSchedule = TeamShiftSchedule.DEFAULT)
 data class MembershipRequest(val uid: String, val name: String, val operationalFunction: String = "", val requestedAt: Long?)
 data class MyRequest(val teamId: String, val teamName: String, val status: String, val requestedAt: Long?)
 data class JoinResult(val teamId: String, val status: String)

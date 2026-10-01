@@ -125,7 +125,8 @@ object Backend {
         val result = call("listMyTeams")
         val teams = (result["teams"] as? List<*>)?.map { value ->
             val t = value as Map<*, *>
-            TeamMembership(t["teamId"] as String, t["teamName"] as String, t["role"] as String, t["operationalFunction"] as? String ?: "")
+            TeamMembership(t["teamId"] as String, t["teamName"] as String, t["role"] as String, t["operationalFunction"] as? String ?: "",
+                TeamShiftSchedule.fromMap(t["shiftSchedule"]))
         } ?: emptyList()
         if (Local.teamId.isBlank() && teams.isNotEmpty())
             Local.register(Local.deviceId, Local.uid, teams.first().teamId, result["name"] as String)
@@ -179,7 +180,7 @@ object Backend {
         } ?: emptyList()
         return TeamDetails(r["teamId"] as String,r["teamName"] as String,r["myRole"] as String,
             number("totalMembers"),number("onlineCount"),number("pausedCount"),number("offlineCount"),number("readyCount"),
-            members,invite,(r["serverNow"] as Number).toLong(),requests,emergencyContacts)
+            members,invite,(r["serverNow"] as Number).toLong(),requests,emergencyContacts,TeamShiftSchedule.fromMap(r["shiftSchedule"]))
     }
     suspend fun updateMemberFunction(teamId: String, uid: String, operationalFunction: OperationalFunction) {
         identity()
@@ -201,6 +202,11 @@ object Backend {
             val m=value as? Map<*,*> ?: return@mapNotNull null
             EmergencyContact(m["id"] as String,m["name"] as String,m["phone"] as String)
         } ?: emptyList()
+    }
+    suspend fun setTeamShiftSchedule(teamId: String, startTime: String): TeamShiftSchedule {
+        identity()
+        val r=call("setTeamShiftSchedule",mapOf("teamId" to teamId,"startTime" to startTime.trim()))
+        return TeamShiftSchedule.fromMap(r["shiftSchedule"])
     }
     suspend fun status(availability: String, reason: String?) {
         identity()

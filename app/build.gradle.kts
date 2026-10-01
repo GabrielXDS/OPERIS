@@ -11,8 +11,8 @@ android {
         applicationId = "br.com.alertaequipe"
         minSdk = 26
         targetSdk = 35
-        versionCode = 36
-        versionName = "4.3.1"
+        versionCode = 37
+        versionName = "4.3.2"
         buildConfigField("boolean", "SELF_HOSTED_PTT_LAB", "false")
         manifestPlaceholders["usesCleartextTraffic"] = "false"
     }

@@ -748,6 +748,13 @@ class MainActivity : ComponentActivity() {
                                 refreshMemberships()
                                 rosterMessage="Cargo de ${member.name} alterado para ${function.label}."
                             }}},
+                            onSaveSchedule={startTime->detailId?.let{id->perform{
+                                val schedule=Backend.setTeamShiftSchedule(id,startTime)
+                                val current=details[id]
+                                if(current!=null)details=details+(id to current.copy(shiftSchedule=schedule))
+                                refreshMemberships()
+                                rosterMessage="Escala 12x36 atualizada: ${schedule.startTime} ?s ${schedule.endTime}."
+                            }}},
                             onRemoveMember={member->detailId?.let{id->perform{
                                 Backend.removeTeamMember(id,member.uid)
                                 details=details+(id to Backend.details(id))

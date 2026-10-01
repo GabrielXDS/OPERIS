@@ -25,6 +25,11 @@ object OperationalNotifications {
 
     fun handleShiftBoundary(context: Context, data: Map<String, String>) {
         val boundary = data["boundary"] ?: return
+        if (boundary == "END") {
+            val endedTeamId = data["teamId"]
+            endedTeamId?.let { PttRadioService.setDuty(context, it, false) }
+            if (endedTeamId == null || PttRadioRuntime.teamId.value == endedTeamId) PttRadioService.stop(context)
+        }
         val teamName = data["teamName"]?.trim().orEmpty().ifBlank { "Equipe" }
         val date = data["date"]?.trim().orEmpty()
         val boundaryKey = data["boundaryKey"] ?: (boundary + ":" + teamName + ":" + date)

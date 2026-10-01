@@ -5,7 +5,8 @@ data class TeamMembership(
     val teamId: String,
     val displayName: String,
     val role: String = "member",
-    val operationalFunction: String = ""
+    val operationalFunction: String = "",
+    val shiftSchedule: TeamShiftSchedule = TeamShiftSchedule.DEFAULT
 )
 
 enum class OperationalFunction(val label: String) {

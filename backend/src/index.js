@@ -49,6 +49,7 @@ export const joinTeam = deviceCall(operations.join);
 export const listMyTeams = deviceCall(operations.list);
 export const getTeamDetails = deviceCall(operations.details);
 export const setEmergencyContacts = deviceCall(operations.setEmergencyContacts);
+export const setTeamShiftSchedule = deviceCall(operations.setShiftSchedule);
 export const updateMemberFunction = deviceCall(operations.updateMemberFunction);
 export const setAvailability = deviceCall(operations.setStatus);
 export const deactivateDevice = onCall(options, operations.deactivate);
@@ -180,10 +181,5 @@ export const updateAgpPost = deviceCall(shifts.updatePost);
 export const startAgpCoverage = deviceCall(shifts.startCoverage);
 export const finishAgpCoverage = deviceCall(shifts.finishCoverage);
 export const finishShift = deviceCall(shifts.finish);
-export const notifyNightShiftStart = onSchedule({schedule:"0 19 * * *",timeZone:"America/Sao_Paulo",region:"southamerica-east1"}, async()=>shifts.notifyShiftBoundary("START"));
-export const autoCloseNightShifts = onSchedule({schedule:"0 7 * * *",timeZone:"America/Sao_Paulo",region:"southamerica-east1"}, async()=>{
-  const closeResult=await shifts.autoCloseExpired();
-  const notifyResult=await shifts.notifyShiftBoundary("END");
-  return {closeResult,notifyResult};
-});
+export const autoCloseNightShifts = onSchedule({schedule:"* * * * *",timeZone:"America/Sao_Paulo",region:"southamerica-east1"}, async()=>shifts.autoCloseExpired());
 

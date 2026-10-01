@@ -136,11 +136,12 @@ private fun Summary(team: TeamDetails) {
 internal fun TeamDetailsScreen(team: TeamDetails?, created: Boolean, message:String, refreshing:Boolean,
     onRefresh:()->Unit,onBack:()->Unit,onCopy:(String)->Unit,onShare:(String,String)->Unit,onInvite:(String)->Unit,
     busy:Boolean,onReview:(String,Boolean)->Unit,onEditFunction:(MemberStatus,OperationalFunction)->Unit,
-    onRemoveMember:(MemberStatus)->Unit,onDissolve:()->Unit) {
+    onSaveSchedule:(String)->Unit,onRemoveMember:(MemberStatus)->Unit,onDissolve:()->Unit) {
     var dissolveOpen by remember { mutableStateOf(false) }
     var removeTarget by remember { mutableStateOf<MemberStatus?>(null) }
     var editFunctionTarget by remember { mutableStateOf<MemberStatus?>(null) }
     var editFunctionChoice by remember { mutableStateOf("") }
+    var scheduleStart by remember(team?.teamId,team?.shiftSchedule?.startTime) { mutableStateOf(team?.shiftSchedule?.startTime ?: "19:00") }
     ScreenColumn {
         TextButton(onClick=onBack) { Text("VOLTAR") }
         if(created)Text("EQUIPE CRIADA",color=Color(0xFF69DAB1),fontWeight=FontWeight.Bold)
@@ -150,7 +151,17 @@ internal fun TeamDetailsScreen(team: TeamDetails?, created: Boolean, message:Str
         if(message.isNotBlank())Text(message,color=AppMuted)
         if(team==null) { Text("Aguardando dados da equipe.",color=AppMuted); return@ScreenColumn }
         Summary(team)
-        Text("Seu papel: "+(if(team.myRole=="owner") "Proprietário" else "Membro"),color=AppMuted)
+        Text("Seu papel: "+(if(team.myRole=="owner") "Proprietário" else if(team.myRole=="admin") "Administrador" else "Membro"),color=AppMuted)
+        Text("Escala da equipe: ${team.shiftSchedule.startTime} - ${team.shiftSchedule.endTime} | 12x36",color=AppMuted)
+        if(team.myRole=="owner" || team.myRole=="admin") {
+            Spacer(Modifier.height(20.dp))
+            SectionHeader("ESCALA DA EQUIPE")
+            Text("Referência 12x36. O horário real de início do plantão continua livre; o OPERIS usa esta configuração para calcular o encerramento automático.",color=AppMuted,fontSize=12.sp)
+            OutlinedTextField(scheduleStart,{if(it.length<=5)scheduleStart=it},label={Text("Horário-base de início (HH:mm)")},singleLine=true,modifier=Modifier.fillMaxWidth().padding(top=8.dp))
+            val calculatedEnd=TeamShiftSchedule.calculatedEnd(scheduleStart)
+            Text("12h de serviço | 36h de descanso"+(calculatedEnd?.let{" | término calculado: $it"}?:""),color=AppMuted,fontSize=12.sp)
+            Button(onClick={onSaveSchedule(scheduleStart)},enabled=!busy && calculatedEnd!=null && scheduleStart!=team.shiftSchedule.startTime,modifier=Modifier.fillMaxWidth().padding(top=10.dp)) { Text("SALVAR ESCALA 12X36") }
+        }
         if(team.myRole=="owner") {
             Spacer(Modifier.height(20.dp))
             Text("Código de convite",fontWeight=FontWeight.Bold,

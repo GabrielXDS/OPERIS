@@ -3,6 +3,7 @@ import {HttpsError} from "firebase-functions/v2/https";
 import {randomInt, randomUUID, createHash} from "node:crypto";
 import {requestedDeviceId, requireActiveDevice} from "./devices.js";
 import {text, uuid, cleanName, normalizeInvite, teamIdentifier, availability, operationalStatus, deviceReady, INVITE_ALPHABET, MAX_TEAMS} from "./policy.js";
+import {normalizeTeamShiftSchedule, validShiftTime} from "./shift-schedule.js";
 
 export const requireUid = req => {
   if (!req.auth?.uid) throw new HttpsError("unauthenticated","Autenticação necessária.");
@@ -115,7 +116,8 @@ export function teamOperations(db) {
           if((u.data().teamIds||[]).length>=MAX_TEAMS) throw new HttpsError("resource-exhausted","Limite de 20 equipes.");
           if(invite.exists) throw new Error("CODE_COLLISION");
           const expiresAt=Timestamp.fromMillis(Date.now()+7*86400000);
-          tx.create(tr,{name,ownerUid:uid,requireApproval:true,enabled:true,active:true,deviceCount:1,pendingCount:0,inviteCode:code,inviteId,createdAt:stamp()});
+          tx.create(tr,{name,ownerUid:uid,requireApproval:true,enabled:true,active:true,deviceCount:1,pendingCount:0,inviteCode:code,inviteId,
+            shiftSchedule:normalizeTeamShiftSchedule(),createdAt:stamp()});
           tx.create(tr.collection("members").doc(uid),{uid,role:"owner",operationalFunction:ownerFunction,status:"active",enabled:true,joinedAt:stamp()});
           tx.create(ir,{teamId:tr.id,inviteId,active:true,createdAt:stamp(),expiresAt});
           tx.update(ur,{teamIds:FieldValue.arrayUnion(tr.id),updatedAt:stamp()});
@@ -196,7 +198,8 @@ export function teamOperations(db) {
       const [t,m]=await db.getAll(db.doc("teams/"+id),db.doc("teams/"+id+"/members/"+uid));
       if(t.data()?.enabled!==true || t.data()?.active===false)continue;
       if(m.data()?.status==="active" && m.data()?.enabled===true)
-        teams.push({teamId:id,teamName:teamName(id,t.data()),role:m.data().role,operationalFunction:m.data().operationalFunction||user.data()?.operationalFunction||""});
+        teams.push({teamId:id,teamName:teamName(id,t.data()),role:m.data().role,operationalFunction:m.data().operationalFunction||user.data()?.operationalFunction||"",
+          shiftSchedule:normalizeTeamShiftSchedule(t.data().shiftSchedule)});
       else if(["pending","rejected"].includes(m.data()?.status))
         requests.push({teamId:id,teamName:teamName(id,t.data()),status:m.data().status,requestedAt:millis(m.data().requestedAt)});
     }
@@ -288,7 +291,8 @@ export function teamOperations(db) {
       }
     }
     const versionHealth=privileged?Object.entries(result.reduce((acc,m)=>{const v=m.appVersion||"sem versão";acc[v]=(acc[v]||0)+1;return acc;},{})).map(([version,count])=>({version,count})):[];
-    return {teamId:id,teamName:teamName(id,team),myRole:member.role,myOperationalFunction:member.operationalFunction||"",invite,requests,emergencyContacts,auditEntries,versionHealth,serverNow:now,totalMembers:result.length,
+    return {teamId:id,teamName:teamName(id,team),myRole:member.role,myOperationalFunction:member.operationalFunction||"",invite,requests,emergencyContacts,
+      shiftSchedule:normalizeTeamShiftSchedule(team.shiftSchedule),auditEntries,versionHealth,serverNow:now,totalMembers:result.length,
       onlineCount:result.filter(m=>m.status==="online").length,pausedCount:result.filter(m=>m.status==="paused").length,
       offlineCount:result.filter(m=>m.status==="offline").length,
       readyCount:result.filter(m=>m.status!=="offline" && m.appReady).length,members:result};
@@ -313,6 +317,23 @@ export function teamOperations(db) {
       throw new HttpsError("permission-denied","Somente a administração da equipe.");
     await tr.update({emergencyContacts:contacts,emergencyContactsUpdatedAt:stamp(),emergencyContactsUpdatedBy:uid});
     return {contacts};
+  }
+  async function setShiftSchedule(req) {
+    const uid=requireUid(req),id=validate(()=>teamIdentifier(req.data?.teamId));
+    const startTime=String(req.data?.startTime||"").trim();
+    if(!validShiftTime(startTime))throw new HttpsError("invalid-argument","Informe o horário no formato HH:mm.");
+    const tr=db.doc("teams/"+id),mr=tr.collection("members").doc(uid);
+    const [ts,ms,user]=await db.getAll(tr,mr,db.doc("users/"+uid));
+    const t=requireEnabled(ts),m=requireActiveMembership(ms);
+    await requireActiveDevice(db,{get:ref=>ref.get()},req,uid);
+    if(!(m.role==="admin" || (m.role==="owner" && t.ownerUid===uid)))
+      throw new HttpsError("permission-denied","Somente a administração da equipe pode configurar a escala.");
+    const shiftSchedule=normalizeTeamShiftSchedule({startTime});
+    await tr.update({shiftSchedule,shiftScheduleUpdatedAt:stamp(),shiftScheduleUpdatedBy:uid});
+    const auditRef=db.collection("teams/"+id+"/audit").doc();
+    await auditRef.set({auditId:auditRef.id,actorUid:uid,actorName:user.data()?.name||"Administrador",action:"SHIFT_SCHEDULE_CHANGED",
+      targetUid:null,targetName:null,details:{startTime:shiftSchedule.startTime,endTime:shiftSchedule.endTime,mode:shiftSchedule.mode},at:stamp()});
+    return {shiftSchedule};
   }
   function audit(tx,teamId,actorUid,actorName,action,targetUid=null,targetName=null,details={}) {
     const ref=db.collection("teams/"+teamId+"/audit").doc();
@@ -507,7 +528,7 @@ export function teamOperations(db) {
     }
     throw new HttpsError("unavailable","Tente novamente.");
   }
-  return {profile,create,preview,join,list,details,setEmergencyContacts,updateMemberFunction,updateMemberRole,setMemberBlocked,transferOwnership,removeMember,dissolve,sync,setStatus,deactivate,selectTeam,manageInvite,review,authorize};
+  return {profile,create,preview,join,list,details,setEmergencyContacts,setShiftSchedule,updateMemberFunction,updateMemberRole,setMemberBlocked,transferOwnership,removeMember,dissolve,sync,setStatus,deactivate,selectTeam,manageInvite,review,authorize};
 }
 
 // Only active, approved memberships can receive. No legacy-team lookup or token replication.

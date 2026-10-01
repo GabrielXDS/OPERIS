@@ -21,7 +21,7 @@ object ShiftReportText {
         return buildList {
             add("*$place, ${dateLong(s.startedAt)}*")
             if (s.company.isNotBlank()) add("Empresa: ${s.company}")
-            add("Plantão: ${s.shiftLabel.ifBlank { "19 às 07 - Noturno" }}")
+            add("Plantão: ${s.shiftLabel.ifBlank { "Plantão operacional" }}")
             if (teamName.isNotBlank()) {
                 add("*$teamName:* " + regular.joinToString(" X ") { it.name }.ifBlank { "Equipe não informada" })
             }
@@ -59,11 +59,15 @@ object ShiftReportText {
         }
     }
 
+    private fun reportHeading(report: ShiftReport): String = if (report.shift.status == "ACTIVE" || report.shift.endedAt == null)
+        "*RELATÓRIO PARCIAL — ATÉ O MOMENTO*" else "*RELATÓRIO FINAL DO PLANTÃO*"
+
     fun summary(report: ShiftReport, teamName: String): String {
         val rounds = report.events.filter { it.eventType == "ROUND" }
         val incidents = report.events.filter { it.eventType == "INCIDENT" }
         val h = header(report, teamName)
         return buildList {
+            add(reportHeading(report))
             add(h.first())
             add("")
             addAll(section(3, "Rondas", rounds))
@@ -84,6 +88,7 @@ object ShiftReportText {
             else "Plantão em andamento."
         }
         return buildList {
+            add(reportHeading(report))
             addAll(header(report, teamName))
             add("")
             add("*1° Início de Plantão:* $opening")

@@ -30,7 +30,7 @@ internal fun ShiftScreen(
 ) {
     var company by remember { mutableStateOf("Universidade Paulista - UNIP") }
     var location by remember { mutableStateOf("Brasília-DF") }
-    var label by remember { mutableStateOf("19 às 07 - Noturno") }
+    var label by remember { mutableStateOf("Plantão operacional") }
     var selectedAgpPost by remember { mutableStateOf("") }
     var next by remember { mutableStateOf("") }
     var closing by remember { mutableStateOf("Plantão entregue com todas as orientações e assinaturas de acordo.") }
@@ -80,7 +80,7 @@ internal fun ShiftScreen(
 
         if (shift == null) {
             Text("INICIAR PLANTÃO DA EQUIPE", fontWeight = FontWeight.Bold)
-            Text("No piloto, você pode iniciar e testar a qualquer horário. Fora da escala oficial, o plantão será identificado como manual/teste.", color = AppMuted)
+            Text("O início do plantão é livre. Nesta equipe, o encerramento automático está configurado para ${team?.shiftSchedule?.endTime ?: "07:00"}. Após o encerramento, um novo plantão pode ser iniciado normalmente.", color = AppMuted)
             Spacer(Modifier.height(10.dp))
             OutlinedTextField(company, { company = it }, label = { Text("Empresa") }, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(location, { location = it }, label = { Text("Local") }, modifier = Modifier.fillMaxWidth())
@@ -132,6 +132,14 @@ internal fun ShiftScreen(
             ) { Text("INICIAR E ASSUMIR PLANTÃO") }
         } else {
             ShiftSummaryCard(shift, activeParticipants)
+            val hasBrigadaInShift = shift.participants.any { it.operationalFunction == OperationalFunction.BRIGADISTA.name }
+            if (hasBrigadaInShift && (myFunction == OperationalFunction.BRIGADISTA.name || isAdministrative)) {
+                OutlinedButton(
+                    onClick = { onOpenReport(shift, ShiftReportKind.BRIGADA) },
+                    enabled = !loading,
+                    modifier = Modifier.fillMaxWidth().padding(top = 10.dp)
+                ) { Text("RELATÓRIO DA BRIGADA ATÉ O MOMENTO") }
+            }
 
             if (isAdministrative || myFunction == OperationalFunction.BRIGADISTA.name) {
                 Spacer(Modifier.height(16.dp))
@@ -376,12 +384,8 @@ private fun ShiftSummaryCard(shift: Shift, activeParticipants: List<ShiftPartici
         Column(Modifier.padding(18.dp)) {
             Text("PLANTÃO ATIVO", fontWeight = FontWeight.Bold, color = AppRadioAccent)
             Text(shift.shiftLabel.ifBlank { "Plantão operacional" }, fontWeight = FontWeight.Bold)
-            Text("Início: ${shift.formattedStart}", color = AppMuted)
-            Text(
-                if (shift.officialStartAt != null) "Plantão oficial • 19:00–07:00"
-                else "Plantão manual/teste • fora da escala oficial",
-                color = if (shift.officialStartAt != null) AppRadioAccent else AppAmber
-            )
+            Text("Início registrado no OPERIS: ${shift.formattedStart}", color = AppMuted)
+            Text("Encerramento automático: ${shift.formattedScheduledEnd ?: "horário da equipe"}", color = AppRadioAccent)
             if (shift.company.isNotBlank()) Text(shift.company)
             if (shift.location.isNotBlank()) Text(shift.location, color = AppMuted)
             if (shift.securityPosts.isNotEmpty()) {
@@ -414,9 +418,10 @@ internal fun ShiftReportScreen(
         }
         context.startActivity(Intent.createChooser(intent, title))
     }
+    val reportTitle = report?.shift?.let { if (it.status == "ACTIVE" || it.endedAt == null) "RELATÓRIO PARCIAL — ATÉ O MOMENTO" else "RELATÓRIO FINAL DO PLANTÃO" } ?: kind.label.uppercase()
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
         TextButton(onClick = onBack, enabled = !loading) { Text("‹ VOLTAR") }
-        Text(kind.label.uppercase(), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        Text(reportTitle, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
         Spacer(Modifier.height(12.dp))
 
         if (loading && report == null) {
@@ -426,6 +431,7 @@ internal fun ShiftReportScreen(
 
         report?.let { data ->
             val shift = data.shift
+            val isPartial = shift.status == "ACTIVE" || shift.endedAt == null
             val securityFunctions = setOf(OperationalFunction.VIGILANTE.name, OperationalFunction.AGP.name)
             val participants = shift.participants.filter { member ->
                 if (kind == ShiftReportKind.BRIGADA) member.operationalFunction == OperationalFunction.BRIGADISTA.name
@@ -518,9 +524,14 @@ internal fun ShiftReportScreen(
             }
 
             Spacer(Modifier.height(20.dp))
-            Text("RELATÓRIO DE ENCERRAMENTO", fontWeight = FontWeight.Bold)
-            Text(shift.closingNotes.ifBlank { "Plantão encerrado sem observação adicional." })
-            if (shift.nextTeam.isNotBlank()) Text("Equipe que recebeu: ${shift.nextTeam}", color = AppMuted)
+            if (isPartial) {
+                Text("STATUS DO PLANTÃO", fontWeight = FontWeight.Bold)
+                Text("Plantão em andamento. Este relatório reúne os registros disponíveis até o momento.")
+            } else {
+                Text("RELATÓRIO DE ENCERRAMENTO", fontWeight = FontWeight.Bold)
+                Text(shift.closingNotes.ifBlank { "Plantão encerrado sem observação adicional." })
+                if (shift.nextTeam.isNotBlank()) Text("Equipe que recebeu: ${shift.nextTeam}", color = AppMuted)
+            }
             if (shift.openingNotes.isNotBlank()) {
                 Spacer(Modifier.height(12.dp))
                 Text("Registro de abertura", fontWeight = FontWeight.Bold)

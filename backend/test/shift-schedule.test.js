@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import {isOfficialShiftWindow,officialShiftWindow,localParts,isPilotScheduledDate,nextScheduledStart,pilotBoundary} from "../src/shift-schedule.js";
+import {isOfficialShiftWindow,officialShiftWindow,localParts,isPilotScheduledDate,nextScheduledStart,pilotBoundary,normalizeTeamShiftSchedule,nextShiftEnd,addClockHours} from "../src/shift-schedule.js";
 const at=iso=>Date.parse(iso);
 
 test("pilot 12x36 starts on 26/09/2026 and repeats every 48h",()=>{
@@ -41,4 +41,17 @@ test("boundary notifications follow the 12x36 calendar",()=>{
   assert.equal(pilotBoundary("START",at("2026-09-27T22:00:00Z")).active,false);
   assert.deepEqual(pilotBoundary("END",at("2026-09-27T10:00:00Z")).active,true);
   assert.equal(pilotBoundary("END",at("2026-09-28T10:00:00Z")).active,false);
+});
+
+
+test("team schedule keeps 12x36 and calculates the end time",()=>{
+  assert.equal(addClockHours("19:00",12),"07:00");
+  assert.deepEqual(normalizeTeamShiftSchedule({startTime:"07:00"}),{mode:"12X36",startTime:"07:00",endTime:"19:00",workHours:12,restHours:36,timeZone:"America/Sao_Paulo"});
+});
+
+test("free-start shift always ends at the next configured boundary",()=>{
+  const before=nextShiftEnd(at("2026-10-01T09:59:00Z"),{startTime:"19:00"});
+  assert.deepEqual(localParts(before),{year:2026,month:10,day:1,hour:7,minute:0,second:0});
+  const atBoundary=nextShiftEnd(at("2026-10-01T10:00:00Z"),{startTime:"19:00"});
+  assert.deepEqual(localParts(atBoundary),{year:2026,month:10,day:2,hour:7,minute:0,second:0});
 });

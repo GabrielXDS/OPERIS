@@ -5,15 +5,15 @@ import {HttpsError} from "firebase-functions/v2/https";
 import {requireUid, requireEnabled, requireActiveMembership, alertTargets} from "./teams.js";
 import {teamIdentifier} from "./policy.js";
 import {cleanText, sectorForFunction} from "./incidents.js";
-import {officialShiftWindow, pilotBoundary} from "./shift-schedule.js";
+import {normalizeTeamShiftSchedule, nextShiftEnd, localParts} from "./shift-schedule.js";
 
 const invalid=()=>{throw new HttpsError("invalid-argument","Confira os dados do plantão.");};
 const text=(v,max,optional=false)=>cleanText(v??"",max,optional);
 const participantId=v=>{if(typeof v!=="string"||v.length<1||v.length>128||v.includes("/"))invalid();return v;};
 const millis=v=>v?.toMillis?.()??null;
+const effectiveEndMs=d=>millis(d.officialEndAt)??(millis(d.startedAt)!=null?nextShiftEnd(millis(d.startedAt),d.shiftSchedule):null);
 const serialize=s=>{const d=s.data();return {...d,startedAt:millis(d.startedAt),endedAt:millis(d.endedAt),createdAt:millis(d.createdAt),updatedAt:millis(d.updatedAt),
-  officialStartAt:millis(d.officialStartAt),officialEndAt:millis(d.officialEndAt),reportGeneratedAt:millis(d.reportGeneratedAt),autoClosedAt:millis(d.autoClosedAt)};};
-const effectiveEndMs=d=>millis(d.officialEndAt)??null;
+  officialStartAt:millis(d.officialStartAt),officialEndAt:effectiveEndMs(d),reportGeneratedAt:millis(d.reportGeneratedAt),autoClosedAt:millis(d.autoClosedAt)};};
 const guestUid=uid=>String(uid||"").startsWith("guest:");
 function markDuty(tx,db,teamId,uid,shiftId,now){
   if(guestUid(uid))return;
@@ -30,29 +30,26 @@ function closeAutomatically(before,endMs,now){
   const participants=(before.participants||[]).map(p=>p.endedAt==null?{...p,endedAt:endMs}:p);
   const coverages=(before.coverages||[]).map(c=>c.endedAt==null?{...c,endedAt:endMs,endedByUid:"system",endedByName:"OPERIS"}:c);
   return {...before,status:"CLOSED",endedAt:Timestamp.fromMillis(endMs),updatedAt:now,participants,coverages,autoClosed:true,autoClosedAt:now,
-    reportGeneratedAt:now,closingNotes:before.closingNotes||"Plantão encerrado automaticamente às 07:00 pelo OPERIS."};
+    reportGeneratedAt:now,closingNotes:before.closingNotes||"Plantão encerrado automaticamente pelo OPERIS."};
 }
 
 
-async function notifyShiftBoundary(db,kind,nowMs=Date.now()){
-  const boundary=pilotBoundary(kind,nowMs);
-  if(!boundary.active)return {teams:0,tokens:0};
-  const teams=await db.collection("teams").where("enabled","==",true).limit(200).get();
-  let sentTeams=0,sentTokens=0;
-  for(const team of teams.docs){
-    if(team.data().active===false)continue;
-    const targets=await alertTargets(db,team.id,"__operis_system__");
-    if(!targets.length)continue;
-    const teamName=String(team.data().name||team.id).slice(0,80);
-    const collapse="shift_"+kind.toLowerCase()+"_"+team.id+"_"+boundary.key;
-    const response=await getMessaging().sendEachForMulticast({
-      tokens:targets.map(t=>t.fcmToken),
-      android:{priority:"normal",collapseKey:collapse,ttl:3600000},
-      data:{type:"shift_schedule_boundary",boundary:kind,teamId:team.id,teamName,date:boundary.dateLabel,boundaryKey:collapse}
-    });
-    sentTeams++;sentTokens+=response.successCount;
-  }
-  return {teams:sentTeams,tokens:sentTokens};
+function shiftDateLabel(ms){
+  const p=localParts(ms),pad=n=>String(n).padStart(2,"0");
+  return pad(p.day)+"/"+pad(p.month)+"/"+p.year;
+}
+
+async function notifyShiftClosed(db,teamId,shiftId,endMs){
+  const team=await db.doc("teams/"+teamId).get();
+  if(!team.exists||team.data().enabled!==true||team.data().active===false)return {tokens:0};
+  const targets=await alertTargets(db,teamId,"__operis_system__");
+  if(!targets.length)return {tokens:0};
+  const teamName=String(team.data().name||teamId).slice(0,80),key="shift_closed_"+shiftId;
+  const response=await getMessaging().sendEachForMulticast({
+    tokens:targets.map(t=>t.fcmToken),android:{priority:"high",collapseKey:key,ttl:3600000},
+    data:{type:"shift_schedule_boundary",boundary:"END",teamId,teamName,shiftId,date:shiftDateLabel(endMs),endedAt:String(endMs),boundaryKey:key}
+  });
+  return {tokens:response.successCount,failed:response.failureCount};
 }
 
 async function notifyShiftOpenedCreated(db,snap){
@@ -75,19 +72,19 @@ async function notifyShiftOpenedCreated(db,snap){
 export function shiftOperations(db){
   async function member(tx,uid,teamId){
     const [team,membership,user]=await tx.getAll(db.doc(`teams/${teamId}`),db.doc(`teams/${teamId}/members/${uid}`),db.doc(`users/${uid}`));
-    requireEnabled(team);requireActiveMembership(membership);
+    const teamData=requireEnabled(team);requireActiveMembership(membership);
     if(!user.exists)throw new HttpsError("failed-precondition","Informe seu nome primeiro.");
     const operationalFunction=String(membership.data().operationalFunction||user.data().operationalFunction||"").toUpperCase();
     if(!["BRIGADISTA","VIGILANTE","AGP"].includes(operationalFunction))
       throw new HttpsError("failed-precondition","Defina sua função operacional antes de assumir o plantão.");
-    return {name:text(user.data().name,40),role:membership.data().role,operationalFunction};
+    return {name:text(user.data().name,40),role:membership.data().role,operationalFunction,team:teamData};
   }
   async function teamActive(tx,teamId){
     const q=db.collection("shifts").where("teamId","==",teamId).where("status","==","ACTIVE").limit(1);
     const snap=await tx.get(q);return snap.docs[0]??null;
   }
   async function start(req){
-    const uid=requireUid(req),teamId=teamIdentifier(req.data?.teamId),nowMs=Date.now(),window=officialShiftWindow(nowMs);
+    const uid=requireUid(req),teamId=teamIdentifier(req.data?.teamId),nowMs=Date.now();
     const now=Timestamp.fromMillis(nowMs);
     const requestedPost=text(req.data?.post,80,true).toUpperCase();
     const portariaName=text(req.data?.portariaName,40,true);
@@ -96,9 +93,12 @@ export function shiftOperations(db){
       throw new HttpsError("invalid-argument","Informe os nomes dos dois postos da Segurança.");
     const result=await db.runTransaction(async tx=>{
       const who=await member(tx,uid,teamId);
+      let autoClosed=null;
       let existing=await teamActive(tx,teamId);
       if(existing&&effectiveEndMs(existing.data())!=null&&effectiveEndMs(existing.data())<=nowMs){
-        const closed=closeAutomatically(existing.data(),effectiveEndMs(existing.data()),now);
+        const expiredEnd=effectiveEndMs(existing.data());
+        autoClosed={teamId,shiftId:existing.id,endMs:expiredEnd};
+        const closed=closeAutomatically(existing.data(),expiredEnd,now);
         clearDutyForParticipants(tx,db,teamId,existing.data(),now);
         tx.set(existing.ref,closed);
         existing=null;
@@ -132,13 +132,14 @@ export function shiftOperations(db){
           securityPosts:securityPosts??(before.securityPosts||[]),updatedAt:now};
         markDuty(tx,db,teamId,uid,existing.id,now);
         tx.set(existing.ref,merged,{merge:true});
-        return {shift:serialize({data:()=>merged}),starter:participant,opened:false};
+        return {shift:serialize({data:()=>merged}),starter:participant,opened:false,autoClosed};
       }
       const ref=db.collection("shifts").doc();
+      const shiftSchedule=normalizeTeamShiftSchedule(who.team.shiftSchedule),endMs=nextShiftEnd(nowMs,shiftSchedule);
       const record={shiftId:ref.id,teamId,status:"ACTIVE",startedAt:now,endedAt:null,createdAt:now,updatedAt:now,
-        officialStartAt:window.open?Timestamp.fromMillis(window.startMs):null,officialEndAt:window.open?Timestamp.fromMillis(window.endMs):null,
-        scheduleMode:window.open?"OFFICIAL":"MANUAL_TEST",autoClosed:false,autoClosedAt:null,reportGeneratedAt:null,
-        shiftLabel:text(req.data?.shiftLabel,60,true)||"19 às 07 - Noturno",
+        officialStartAt:null,officialEndAt:Timestamp.fromMillis(endMs),shiftSchedule,
+        scheduleMode:"FLEXIBLE_START",autoClosed:false,autoClosedAt:null,reportGeneratedAt:null,
+        shiftLabel:text(req.data?.shiftLabel,60,true)||"Plantão operacional",
         company:text(req.data?.company,100,true),location:text(req.data?.location,100,true),
         previousTeam:text(req.data?.previousTeam,60,true),nextTeam:"",
         equipmentNotes:text(req.data?.equipmentNotes||"Sem alterações",1000,true),
@@ -146,8 +147,9 @@ export function shiftOperations(db){
         closingNotes:"",securityPosts:securityPosts||[],participantUids:[uid],participants:[participant]};
       tx.update(db.doc(`teams/${teamId}`),{updatedAt:now});
       markDuty(tx,db,teamId,uid,ref.id,now);
-      tx.create(ref,record);return {shift:serialize({data:()=>record}),starter:participant,opened:true};
+      tx.create(ref,record);return {shift:serialize({data:()=>record}),starter:participant,opened:true,autoClosed};
     });
+    if(result.autoClosed) try { await notifyShiftClosed(db,result.autoClosed.teamId,result.autoClosed.shiftId,result.autoClosed.endMs); } catch(_) {}
     return {shift:result.shift,opened:result.opened};
   }
   async function current(req){
@@ -350,18 +352,22 @@ export function shiftOperations(db){
   async function autoCloseExpired(){
     const nowMs=Date.now(),now=Timestamp.fromMillis(nowMs);
     const active=await db.collection("shifts").where("status","==","ACTIVE").limit(200).get();
-    let closed=0;
+    let closed=0,notifiedTokens=0;
     for(const doc of active.docs){
       if(effectiveEndMs(doc.data())==null||effectiveEndMs(doc.data())>nowMs)continue;
       const changed=await db.runTransaction(async tx=>{
-        const snap=await tx.get(doc.ref);if(!snap.exists||snap.data().status!=="ACTIVE")return false;
-        const endMs=effectiveEndMs(snap.data());if(endMs==null||endMs>nowMs)return false;
+        const snap=await tx.get(doc.ref);if(!snap.exists||snap.data().status!=="ACTIVE")return null;
+        const endMs=effectiveEndMs(snap.data());if(endMs==null||endMs>nowMs)return null;
         clearDutyForParticipants(tx,db,snap.data().teamId,snap.data(),now);
-        tx.set(doc.ref,closeAutomatically(snap.data(),endMs,now));return true;
+        tx.set(doc.ref,closeAutomatically(snap.data(),endMs,now));
+        return {teamId:snap.data().teamId,shiftId:snap.id,endMs};
       });
-      if(changed)closed++;
+      if(changed){
+        closed++;
+        try { notifiedTokens+=(await notifyShiftClosed(db,changed.teamId,changed.shiftId,changed.endMs)).tokens||0; } catch(_) {}
+      }
     }
-    return {closed};
+    return {closed,notifiedTokens};
   }
-  return {start,current,list,report,addIntermediate,confirmSecurityPosts,updatePost,startCoverage,finishCoverage,finish,autoCloseExpired,notifyOpened:snap=>notifyShiftOpenedCreated(db,snap),notifyShiftBoundary:(kind,nowMs)=>notifyShiftBoundary(db,kind,nowMs)};
+  return {start,current,list,report,addIntermediate,confirmSecurityPosts,updatePost,startCoverage,finishCoverage,finish,autoCloseExpired,notifyOpened:snap=>notifyShiftOpenedCreated(db,snap)};
 }

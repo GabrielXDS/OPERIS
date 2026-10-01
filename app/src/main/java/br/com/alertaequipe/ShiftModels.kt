@@ -65,6 +65,7 @@ data class Shift(
 ) {
     val formattedStart:String get()=SimpleDateFormat("dd/MM/yyyy HH:mm",Locale("pt","BR")).format(Date(startedAt))
     val formattedEnd:String? get()=endedAt?.let{SimpleDateFormat("dd/MM/yyyy HH:mm",Locale("pt","BR")).format(Date(it))}
+    val formattedScheduledEnd:String? get()=officialEndAt?.let{SimpleDateFormat("dd/MM/yyyy HH:mm",Locale("pt","BR")).format(Date(it))}
     companion object {
         fun fromMap(m:Map<*,*>):Shift=Shift(
             m["shiftId"] as String,m["teamId"] as String,m["status"] as String,(m["startedAt"] as Number).toLong(),(m["endedAt"] as? Number)?.toLong(),
