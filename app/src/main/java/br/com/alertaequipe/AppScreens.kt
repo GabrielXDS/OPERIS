@@ -71,11 +71,17 @@ data class AlertDiagnostics(
     val doNotDisturb: Boolean,
     val audioWarning: Boolean,
     val alarmVolume: Int,
-    val maximumAlarmVolume: Int
+    val maximumAlarmVolume: Int,
+    val cameraGranted: Boolean = false
 ) {
+    // Camera, battery exemption and policy access are recommendations, not operation gates.
+    fun preparationAdjustments(online: Boolean, connectedToTeam: Boolean): Int =
+        listOf(!notificationsEnabled, !channelReady, !fullScreenIntentAllowed, !microphoneGranted,
+            doNotDisturb, audioWarning, !online || !connectedToTeam).count { it }
+
     // Alarm volume zero is not, by itself, a failure: the existing service raises it temporarily.
     val needsAttention get() = !notificationsEnabled || !channelReady || !fullScreenIntentAllowed || !microphoneGranted ||
-        !notificationPolicyAccess || !batteryOptimizationIgnored || doNotDisturb || audioWarning
+        doNotDisturb || audioWarning
 }
 
 @Composable
@@ -419,10 +425,11 @@ internal fun ReportsScreen(onGenerate: () -> Unit) {
 internal fun SettingsScreen(
     diagnostics: AlertDiagnostics, online: Boolean, ready: Boolean, lastAlert: String?,
     onNotifications: () -> Unit, onFullScreen: () -> Unit, onSound: () -> Unit, onDoNotDisturb: () -> Unit,
-    onMicrophone: () -> Unit, onBattery: () -> Unit,
+    onMicrophone: () -> Unit, onCamera: () -> Unit, onDndMode: () -> Unit,
+    onNetwork: () -> Unit, onBattery: () -> Unit,
     onTest: () -> Unit, onRetry: () -> Unit,
     latestRelease: ReleasePolicy?, releaseNote: String, checkingUpdate: Boolean,
-    onCheckUpdate: () -> Unit, onShareRelease: () -> Unit,
+    onCheckUpdate: () -> Unit, onShowUpdate: () -> Unit, onShareRelease: () -> Unit,
     onStatus: () -> Unit, statusLabel: String,
     accountEmail: String?, onProtectAccount: () -> Unit, onLogout: () -> Unit
 ) {
@@ -433,12 +440,15 @@ internal fun SettingsScreen(
         SettingsCard("Sobre") {
             Text("Versão instalada: "+BuildConfig.VERSION_NAME)
             val release = latestRelease
-            if (release != null) {
+            if (release != null && release.status == ReleasePolicyStatus.PUBLISHED) {
                 Spacer(Modifier.height(6.dp))
                 Text("Última versão disponível: ${release.latestVersionName}", color = AppMuted)
                 if (release.latestVersionCode > BuildConfig.VERSION_CODE) {
                     Spacer(Modifier.height(4.dp))
-                    Text("Atualização disponível para este aparelho.", color = AppGreen)
+                    Text("Nova versão disponível", color = AppGreen)
+                    release.releaseNotes.forEach { Text("• $it", color = AppMuted) }
+                    release.apkSize?.let { Text("Tamanho: " + UpdateFlow.formatApkSize(it), color = AppMuted) }
+                    Button(onClick = onShowUpdate, enabled = release.canDownload()) { Text("ATUALIZAR") }
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -466,13 +476,22 @@ internal fun SettingsScreen(
         }
         Spacer(Modifier.height(16.dp))
         SettingsCard("Preparação do aparelho") {
-            Text("Toque em cada item pendente para liberar o aparelho para operação.", color = AppMuted)
+            val adjustments = diagnostics.preparationAdjustments(online, ready)
+            Text(if (adjustments == 0) "APARELHO PRONTO PARA OPERAÇÃO" else "$adjustments AJUSTES NECESSÁRIOS",
+                color = if (adjustments == 0) AppGreen else AppAmber, fontWeight = FontWeight.Bold)
+            Text("Toque nos ajustes pendentes. Recomendações não impedem o uso do aplicativo.", color = AppMuted)
+            if (!online) PreparationAction("Internet", "Abrir conexões do aparelho", false, onNetwork)
+            else if (!ready) PreparationAction("Conexão com a equipe", "Verificar conexão", false, onRetry)
             PreparationAction("Notificações", if (diagnostics.notificationsEnabled) "Permitidas" else "Autorizar", diagnostics.notificationsEnabled, onNotifications)
             PreparationAction("Alertas em destaque", if (diagnostics.channelReady) "Configurados" else "Configurar", diagnostics.channelReady, onNotifications)
-            PreparationAction("Tela bloqueada", if (diagnostics.fullScreenIntentAllowed) "Sobreposição permitida" else "Autorizar sobreposição", diagnostics.fullScreenIntentAllowed, onFullScreen)
+            PreparationAction("Tela bloqueada", if (diagnostics.fullScreenIntentAllowed) "Alerta em tela cheia permitido" else "Autorizar alerta em tela cheia", diagnostics.fullScreenIntentAllowed, onFullScreen)
             PreparationAction("Microfone", if (diagnostics.microphoneGranted) "Permitido" else "Autorizar", diagnostics.microphoneGranted, onMicrophone)
-            PreparationAction("Não Perturbe", if (diagnostics.notificationPolicyAccess) "Acesso autorizado" else "Autorizar acesso", diagnostics.notificationPolicyAccess, onDoNotDisturb)
-            PreparationAction("Bateria", if (diagnostics.batteryOptimizationIgnored) "Sem restrição" else "Revisar otimização", diagnostics.batteryOptimizationIgnored, onBattery)
+            if (diagnostics.doNotDisturb) PreparationAction("Não Perturbe ativo", "Revisar modo de som", false, onDndMode)
+            if (diagnostics.audioWarning) PreparationAction("Restrição de reprodução", "Revisar som e testar a sirene", false, onSound)
+            Text("RECOMENDAÇÕES", color = AppMuted, fontSize = 12.sp)
+            PreparationAction("Câmera", if (diagnostics.cameraGranted) "Permitida" else "Autorizar para tirar fotos (opcional)", diagnostics.cameraGranted, onCamera)
+            PreparationAction("Não Perturbe", if (diagnostics.notificationPolicyAccess) "Acesso autorizado" else "Autorizar acesso (recomendado)", diagnostics.notificationPolicyAccess, onDoNotDisturb)
+            PreparationAction("Bateria", if (diagnostics.batteryOptimizationIgnored) "Sem restrição" else "Revisar otimização (recomendado)", diagnostics.batteryOptimizationIgnored, onBattery)
             Spacer(Modifier.height(8.dp))
             TextButton(onClick = onSound) { Text("CONFIGURAÇÃO DE SOM", color = Color.White) }
         }
@@ -489,21 +508,22 @@ internal fun SettingsScreen(
         }
         Spacer(Modifier.height(16.dp))
         SettingsCard("Diagnóstico do aparelho") {
-            Diagnostic("Status do aparelho", if (ready && online && !diagnostics.needsAttention) "App pronto" else "Revisar preparação")
+            Diagnostic("Status do aparelho", if (diagnostics.preparationAdjustments(online, ready) == 0) "App pronto" else "Revisar preparação")
             Diagnostic("Internet", if (online) "Conectada" else "Sem conexão")
             Diagnostic("Conexão com a equipe", if (ready && online) "Confirmada" else "Aguardando confirmação")
-            Diagnostic("Notificações", if (diagnostics.notificationsEnabled) "Permitidas" else "Bloqueadas")
-            Diagnostic("Alertas em destaque", if (diagnostics.channelReady) "Configurados" else "Revisar configuração")
-            Diagnostic("Tela bloqueada", if (diagnostics.fullScreenIntentAllowed) "Sobreposição permitida" else "Permissão pendente")
-            Diagnostic("Não Perturbe", if (diagnostics.doNotDisturb) "ATIVO — desative para prontidão" else "Desativado")
-            Diagnostic("Microfone", if (diagnostics.microphoneGranted) "Permitido" else "Pendente")
-            Diagnostic("Acesso ao Não Perturbe", if (diagnostics.notificationPolicyAccess) "Autorizado" else "Pendente")
-            Diagnostic("Bateria", if (diagnostics.batteryOptimizationIgnored) "Sem restrição" else "Otimização ativa")
-            Diagnostic("Volume de alarme", "${diagnostics.alarmVolume} de ${diagnostics.maximumAlarmVolume}")
             TextButton(onClick = { showTechnical = !showTechnical }) {
                 Text(if (showTechnical) "OCULTAR INFORMAÇÕES TÉCNICAS" else "INFORMAÇÕES TÉCNICAS", color = AppMuted)
             }
             if (showTechnical) {
+                Diagnostic("Notificações", if (diagnostics.notificationsEnabled) "Permitidas" else "Bloqueadas")
+                Diagnostic("Alertas em destaque", if (diagnostics.channelReady) "Configurados" else "Revisar configuração")
+                Diagnostic("Tela bloqueada", if (diagnostics.fullScreenIntentAllowed) "Alerta em tela cheia permitido" else "Permissão pendente")
+                Diagnostic("Não Perturbe", if (diagnostics.doNotDisturb) "ATIVO — desative para prontidão" else "Desativado")
+                Diagnostic("Microfone", if (diagnostics.microphoneGranted) "Permitido" else "Pendente")
+                Diagnostic("Acesso ao Não Perturbe", if (diagnostics.notificationPolicyAccess) "Autorizado" else "Pendente")
+                Diagnostic("Bateria", if (diagnostics.batteryOptimizationIgnored) "Sem restrição" else "Otimização ativa")
+                Diagnostic("Volume de alarme", "${diagnostics.alarmVolume} de ${diagnostics.maximumAlarmVolume}")
+                Diagnostic("Câmera", if (diagnostics.cameraGranted) "Permitida" else "Não autorizada (opcional)")
                 val diagAuthUid = FirebaseAuth.getInstance().currentUser?.uid
                 val diagLocalDeviceId = Local.deviceId
                 Diagnostic("Firebase Auth UID", diagAuthUid ?: "sem sessão")

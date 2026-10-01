@@ -33,7 +33,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -50,7 +55,8 @@ data class UpdateUiState(
     val downloading: Boolean = false,
     val downloaded: Boolean = false,
     val verified: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    val preparing: Boolean = false
 )
 
 /** Identidade lida do próprio APK baixado (pacote e versão, sem instalar). */
@@ -74,11 +80,18 @@ object UpdateFlow {
     }.getOrNull()
     fun verified(expected: String?, file: File): Boolean {
         if (expected == null || expected.length != 64) return false
-        return expected == sha256(file)
+        return expected.equals(sha256(file), ignoreCase = true)
     }
     /** Triple check do pacote candidato: mesmo app, versão NOVA (maior que a instalada). */
-    fun installable(pkg: String?, apkVersionCode: Int, expectedPackage: String, installedVersionCode: Int): Boolean =
-        pkg == expectedPackage && apkVersionCode > installedVersionCode
+    fun installable(pkg: String?, apkVersionCode: Int, expectedPackage: String, installedVersionCode: Int,
+        advertisedVersionCode: Int = apkVersionCode): Boolean =
+        pkg == expectedPackage && apkVersionCode > installedVersionCode && apkVersionCode == advertisedVersionCode
+
+    fun checkMessage(status: ReleaseStatus, versionName: String): String = when (status) {
+        ReleaseStatus.UP_TO_DATE -> "Você está na versão mais recente."
+        ReleaseStatus.UPDATE_AVAILABLE, ReleaseStatus.REQUIRED -> "Nova versão disponível: $versionName."
+        ReleaseStatus.UNKNOWN -> "Não foi possível verificar agora. Tente novamente."
+    }
     /** Lê packageName/versionCode do APK baixado através do PackageManager (sem instalar). */
     @Suppress("DEPRECATION")
     fun inspect(context: Context, file: File): ApkInspect? = runCatching {
@@ -94,6 +107,9 @@ object UpdateFlow {
     }
     fun enqueue(context: Context, url: String, versionName: String): Long {
         val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        // Only the previous APK candidate is removed; application data is never touched.
+        val destination = downloadedFile(context, versionName)
+        check(!destination.exists() || destination.delete()) { "Não foi possível substituir o download anterior." }
         val request = DownloadManager.Request(Uri.parse(url))
             .setTitle("OPERIS $versionName")
             .setDescription("Baixando a atualização do OPERIS")
@@ -113,11 +129,18 @@ object UpdateFlow {
         }
     }
     fun canInstall(context: Context): Boolean = context.packageManager.canRequestPackageInstalls()
-    fun openUnknownSources(context: Context) {
+    fun openUnknownSources(context: Context): Boolean =
         runCatching {
             context.startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + context.packageName)))
-        }
-    }
+        }.isSuccess
+    fun fallback(context: Context, file: File): Boolean = runCatching {
+        val uri = FileProvider.getUriForFile(context, context.packageName + ".update", file)
+        context.startActivity(Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            clipData = ClipData.newRawUri("Atualização OPERIS", uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        })
+    }.isSuccess
     fun install(context: Context, file: File): Boolean =
         canInstall(context) && UpdatePackageInstaller.install(context, file)
 }
@@ -127,13 +150,12 @@ internal fun RequiredUpdateScreen(
     installedVersionName: String,
     policy: ReleasePolicy,
     state: UpdateUiState,
-    onUpdate: () -> Unit
+    onUpdate: () -> Unit,
+    onFallback: () -> Unit
 ) {
     val published = policy.canDownload()
-    val context = LocalContext.current
-    val canInstall = remember(context) { UpdateFlow.canInstall(context) }
     Column(
-        Modifier.fillMaxSize().background(AppInk).statusBarsPadding().navigationBarsPadding().widthIn(max = 480.dp).fillMaxWidth(),
+        Modifier.fillMaxSize().background(AppInk).statusBarsPadding().navigationBarsPadding().widthIn(max = 480.dp).fillMaxWidth().verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Spacer(Modifier.height(64.dp))
@@ -158,14 +180,14 @@ internal fun RequiredUpdateScreen(
                     modifier = Modifier.padding(vertical = 3.dp))
             }
         }
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(24.dp))
         if (!published) {
             Text("O pacote de atualização ainda não foi publicado. Tente novamente mais tarde.",
                 color = AppMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
         } else if (state.error != null) {
             Text(state.error, color = AppRed, fontSize = 13.sp, textAlign = TextAlign.Center)
         } else if (state.downloading) {
-            Text("Baixando a nova versão…", color = AppMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
+            Text(if (state.preparing) "Validando e preparando a instalação…" else "Baixando a nova versão…", color = AppMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
         } else if (state.downloaded && state.verified) {
             Text("Download concluído. Confirme a instalação.", color = AppMuted, fontSize = 13.sp, textAlign = TextAlign.Center)
         }
@@ -178,6 +200,7 @@ internal fun RequiredUpdateScreen(
         ) {
             Text(
                 when {
+                    state.preparing -> "PREPARANDO…"
                     state.downloading -> "BAIXANDO…"
                     state.downloaded && state.verified -> "INSTALAR"
                     else -> "ATUALIZAR AGORA"
@@ -185,10 +208,13 @@ internal fun RequiredUpdateScreen(
                 fontSize = 17.sp, fontWeight = FontWeight.Bold
             )
         }
-        if (published && !canInstall) {
+        if (published) {
             Spacer(Modifier.height(10.dp))
-            Text("Para instalar, habilite esta fonte nas configurações do aparelho.",
+            Text("O Android pode solicitar autorização para instalar a partir do OPERIS.",
                 color = AppMuted, fontSize = 12.sp, textAlign = TextAlign.Center)
+        }
+        if (state.downloaded && state.verified && !state.downloading) {
+            TextButton(onClick = onFallback) { Text("ABRIR INSTALADOR ALTERNATIVO") }
         }
         Spacer(Modifier.height(28.dp))
     }
@@ -200,16 +226,15 @@ internal fun OptionalUpdateDialog(
     policy: ReleasePolicy,
     state: UpdateUiState,
     onUpdate: () -> Unit,
+    onFallback: () -> Unit,
     onLater: () -> Unit
 ) {
     val published = policy.canDownload()
-    val context = LocalContext.current
-    val canInstall = remember(context) { UpdateFlow.canInstall(context) }
     AlertDialog(
         onDismissRequest = onLater,
         title = { Text("NOVA VERSÃO DISPONÍVEL") },
         text = {
-            Column {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Text("Você usa o OPERIS $installedVersionName. A versão ${policy.latestVersionName} já está disponível.",
                     color = MaterialTheme.colorScheme.onSurface)
                 policy.apkSize?.let {
@@ -224,11 +249,14 @@ internal fun OptionalUpdateDialog(
                 if (!published) Text("O pacote de atualização ainda não foi publicado.",
                     color = AppMuted, fontSize = 13.sp)
                 if (state.error != null) Text(state.error, color = AppRed, fontSize = 13.sp)
-                if (state.downloading) Text("Baixando a nova versão…", color = AppMuted, fontSize = 13.sp)
+                if (state.downloading) Text(if (state.preparing) "Validando e preparando a instalação…" else "Baixando a nova versão…", color = AppMuted, fontSize = 13.sp)
                 if (state.downloaded && state.verified) Text("Download concluído. Confirme a instalação.",
                     color = AppMuted, fontSize = 13.sp)
-                if (published && !canInstall) Text("Para instalar, habilite esta fonte nas configurações do aparelho.",
+                if (published) Text("O Android pode solicitar autorização para instalar a partir do OPERIS.",
                     color = AppMuted, fontSize = 12.sp)
+                if (state.downloaded && state.verified && !state.downloading) {
+                    TextButton(onClick = onFallback) { Text("ABRIR INSTALADOR ALTERNATIVO") }
+                }
             }
         },
         dismissButton = { TextButton(onClick = { if (!state.downloading) onLater() }) { Text("AGORA NÃO") } },
@@ -239,6 +267,7 @@ internal fun OptionalUpdateDialog(
             ) {
                 Text(
                     when {
+                        state.preparing -> "PREPARANDO…"
                         state.downloading -> "BAIXANDO…"
                         state.downloaded && state.verified -> "INSTALAR"
                         else -> "ATUALIZAR"
@@ -265,13 +294,20 @@ internal fun DownloadCompletionMonitor(
     onComplete: (id: Long) -> Unit
 ) {
     val context = LocalContext.current
-    DisposableEffect(downloadId) {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val currentComplete by rememberUpdatedState(onComplete)
+    DisposableEffect(downloadId, lifecycle) {
         if (downloadId == null) return@DisposableEffect onDispose {}
+        fun reconcile() {
+            val status = runCatching { UpdateFlow.queryStatus(context, downloadId) }.getOrNull()
+            if (status == DownloadManager.STATUS_SUCCESSFUL || status == DownloadManager.STATUS_FAILED)
+                currentComplete(downloadId)
+        }
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == DownloadManager.ACTION_DOWNLOAD_COMPLETE &&
                     intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L) == downloadId
-                ) onComplete(downloadId)
+                ) reconcile()
             }
         }
         val filter = IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE)
@@ -281,6 +317,12 @@ internal fun DownloadCompletionMonitor(
             filter,
             ContextCompat.RECEIVER_EXPORTED
         )
-        onDispose { runCatching { context.unregisterReceiver(receiver) } }
+        val observer = LifecycleEventObserver { _, event -> if (event == Lifecycle.Event.ON_RESUME) reconcile() }
+        lifecycle.addObserver(observer)
+        reconcile()
+        onDispose {
+            lifecycle.removeObserver(observer)
+            runCatching { context.unregisterReceiver(receiver) }
+        }
     }
 }

@@ -12,6 +12,7 @@ import java.io.File
 internal object UpdatePackageInstaller {
     fun install(context: Context, file: File): Boolean {
         if (!file.exists() || file.length() <= 0L) return false
+        var pendingSessionId: Int? = null
         return runCatching {
             val packageInstaller = context.packageManager.packageInstaller
             val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {
@@ -22,6 +23,7 @@ internal object UpdatePackageInstaller {
                 }
             }
             val sessionId = packageInstaller.createSession(params)
+            pendingSessionId = sessionId
             packageInstaller.openSession(sessionId).use { session ->
                 file.inputStream().use { input ->
                     session.openWrite("base.apk", 0, file.length()).use { output ->
@@ -39,7 +41,11 @@ internal object UpdatePackageInstaller {
                 session.commit(pending.intentSender)
             }
             true
-        }.getOrElse { false }
+        }.getOrElse {
+            // A failed copy/commit must not leave a staged APK consuming device storage.
+            pendingSessionId?.let { id -> runCatching { context.packageManager.packageInstaller.abandonSession(id) } }
+            false
+        }
     }
 }
 

@@ -32,6 +32,8 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.repeatOnLifecycle
 import com.google.firebase.auth.FirebaseAuth
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
@@ -85,13 +87,16 @@ class MainActivity : ComponentActivity() {
             doNotDisturb = nm.currentInterruptionFilter != NotificationManager.INTERRUPTION_FILTER_ALL,
             audioWarning = Local.prefs.getBoolean("audioWarning", false),
             alarmVolume = am.getStreamVolume(AudioManager.STREAM_ALARM),
-            maximumAlarmVolume = am.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+            maximumAlarmVolume = am.getStreamMaxVolume(AudioManager.STREAM_ALARM),
+            cameraGranted = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
         )
     }
 
     private fun openNotifications() {
         if (Build.VERSION.SDK_INT >= 33 && !NotificationManagerCompat.from(this).areNotificationsEnabled()) {
-            permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            openRuntimePermission(Manifest.permission.POST_NOTIFICATIONS)
+        } else if (!NotificationManagerCompat.from(this).areNotificationsEnabled()) {
+            startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, packageName))
         } else {
             startActivity(Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
                 .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
@@ -107,11 +112,16 @@ class MainActivity : ComponentActivity() {
         } else openNotifications()
     }
 
-    private fun openMicrophonePermission() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
-            permission.launch(Manifest.permission.RECORD_AUDIO)
-        else startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+    private fun openRuntimePermission(name: String) {
+        val requestedKey = "preparation.requested.$name"
+        val deniedPermanently = Local.prefs.getBoolean(requestedKey, false) && !shouldShowRequestPermissionRationale(name)
+        if (checkSelfPermission(name) != PackageManager.PERMISSION_GRANTED && !deniedPermanently) {
+            Local.prefs.edit().putBoolean(requestedKey, true).apply()
+            permission.launch(name)
+        } else startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
     }
+
+    private fun openMicrophonePermission() = openRuntimePermission(Manifest.permission.RECORD_AUDIO)
 
     private fun openBatterySettings() {
         startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
@@ -126,9 +136,13 @@ class MainActivity : ComponentActivity() {
         var releaseNote by remember { mutableStateOf("") }
         var checkingUpdate by remember { mutableStateOf(false) }
         var optionalDismissed by rememberSaveable { mutableStateOf(false) }
-        var downloading by remember { mutableStateOf(false) }
-        var downloadId by remember { mutableStateOf<Long?>(null) }
-        var apkFile by remember { mutableStateOf<File?>(null) }
+        var downloading by rememberSaveable { mutableStateOf(false) }
+        var downloadId by rememberSaveable { mutableStateOf<Long?>(null) }
+        var downloadName by rememberSaveable { mutableStateOf("") }
+        var downloadHash by rememberSaveable { mutableStateOf<String?>(null) }
+        var downloadVersion by rememberSaveable { mutableStateOf(0) }
+        var apkPath by rememberSaveable { mutableStateOf<String?>(null) }
+        var validatingUpdate by remember { mutableStateOf(false) }
         var updateError by remember { mutableStateOf<String?>(null) }
         var identified by remember { mutableStateOf(Local.registered && Local.operationalFunction.isNotBlank()) }
         var restoringSession by remember { mutableStateOf(!Local.registered && FirebaseAuth.getInstance().currentUser != null) }
@@ -298,78 +312,91 @@ class MainActivity : ComponentActivity() {
             if(Build.VERSION.SDK_INT>=33)permission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        val updateUi = UpdateUiState(downloading, apkFile != null,
-            apkFile?.let { file -> releasePolicy?.let { p -> UpdateFlow.verified(p.sha256, file) } } == true,
-            updateError)
+        val updateUi = UpdateUiState(downloading || validatingUpdate, apkPath != null, apkPath != null, updateError, validatingUpdate)
 
         suspend fun refreshRelease(userInitiated: Boolean = false) {
-            if (userInitiated) checkingUpdate = true
-            val cached = teamPreferences.releasePolicy()
-            val now = System.currentTimeMillis()
-            releasePolicy = cached
-            releaseStatus = Operational.classifyRelease(BuildConfig.VERSION_CODE, cached, now)
-            if (releaseStatus == ReleaseStatus.REQUIRED) { checkingUpdate = false; return }
+            if (checkingUpdate) return
+            checkingUpdate = true
             try {
                 val fetched = Backend.getAndroidRelease()
                 val stamped = fetched.copy(cachedAtMs = System.currentTimeMillis())
                 releasePolicy = stamped
                 teamPreferences.saveReleasePolicy(stamped)
-                releaseStatus = Operational.classifyRelease(BuildConfig.VERSION_CODE, stamped, System.currentTimeMillis())
-                if (userInitiated) releaseNote = if (stamped.latestVersionCode > BuildConfig.VERSION_CODE)
-                    "Nova versão disponível: ${stamped.latestVersionName}."
-                else "Você está usando a versão mais recente: OPERIS ${BuildConfig.VERSION_NAME}."
-                else releaseNote = ""
+                releaseStatus = Operational.classifyRelease(BuildConfig.VERSION_CODE, stamped)
+                if (userInitiated) {
+                    releaseNote = UpdateFlow.checkMessage(releaseStatus, stamped.latestVersionName)
+                    optionalDismissed = false
+                }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                releaseNote = if (userInitiated || releaseStatus == ReleaseStatus.UNKNOWN)
-                    "Não foi possível verificar atualizações. Tente novamente." else releaseNote
-            } finally { if (userInitiated) checkingUpdate = false }
+                if (userInitiated) releaseNote = UpdateFlow.checkMessage(ReleaseStatus.UNKNOWN, "")
+            } finally { checkingUpdate = false }
+        }
+        suspend fun validCandidate(file: File, hash: String?, version: Int): Boolean = withContext(Dispatchers.IO) {
+            UpdateFlow.verified(hash, file) && UpdateFlow.inspect(this@MainActivity, file)?.let { i ->
+                UpdateFlow.installable(i.packageName, i.versionCode, BuildConfig.APPLICATION_ID, BuildConfig.VERSION_CODE, version)
+            } == true
         }
         fun onDownloadComplete(id: Long) {
-            if (id != downloadId) return
-            val policy = releasePolicy
-            val file = policy?.let { UpdateFlow.downloadedFile(this@MainActivity, it.latestVersionName) }
-            val status = UpdateFlow.queryStatus(this@MainActivity, id)
-            downloading = false
-            when {
-                policy != null && file != null && status == DownloadManager.STATUS_SUCCESSFUL && UpdateFlow.verified(policy.sha256, file) &&
-                    UpdateFlow.inspect(this@MainActivity, file)?.let { i ->
-                        UpdateFlow.installable(i.packageName, i.versionCode, BuildConfig.APPLICATION_ID, BuildConfig.VERSION_CODE)
-                    } == true -> {
-                    apkFile = file
-                    updateError = null
-                }
-                status == DownloadManager.STATUS_SUCCESSFUL -> {
-                    file?.delete(); apkFile = null
-                    updateError = "O pacote baixado não corresponde a uma versão instalável."
-                }
-                else -> {
-                    file?.delete(); apkFile = null
-                    updateError = "O download da atualização falhou. Tente novamente."
-                }
+            if (id != downloadId || validatingUpdate) return
+            validatingUpdate = true
+            scope.launch {
+                try {
+                    val file = UpdateFlow.downloadedFile(this@MainActivity, downloadName)
+                    if (UpdateFlow.queryStatus(this@MainActivity, id) == DownloadManager.STATUS_SUCCESSFUL &&
+                        validCandidate(file, downloadHash, downloadVersion)) {
+                        apkPath = file.absolutePath
+                        updateError = null
+                    } else {
+                        file.delete(); apkPath = null
+                        updateError = "O download falhou ou o pacote não corresponde à atualização. Tente novamente."
+                    }
+                    downloadId = null
+                    downloading = false
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    updateError = "Não foi possível validar o download. Tente novamente."
+                    downloadId = null; downloading = false; apkPath = null
+                } finally { validatingUpdate = false }
             }
         }
-        fun updateNow() {
+        fun updateNow(useFallback: Boolean = false) {
+            if (downloading || validatingUpdate) return
             val policy = releasePolicy ?: return
             updateError = null
             if (!policy.canDownload()) { updateError = "O pacote de atualização ainda não foi publicado."; return }
-            val existing = apkFile
-            if (existing != null && UpdateFlow.verified(policy.sha256, existing) &&
-                UpdateFlow.inspect(this@MainActivity, existing)?.let { i ->
-                    UpdateFlow.installable(i.packageName, i.versionCode, BuildConfig.APPLICATION_ID, BuildConfig.VERSION_CODE)
-                } == true
-            ) {
-                if (UpdateFlow.canInstall(this@MainActivity)) UpdateFlow.install(this@MainActivity, existing)
-                else UpdateFlow.openUnknownSources(this@MainActivity)
+            val existing = apkPath?.let(::File)
+            if (existing != null) {
+                validatingUpdate = true
+                scope.launch {
+                    try {
+                        if (!validCandidate(existing, policy.sha256, policy.latestVersionCode)) {
+                            existing.delete(); apkPath = null
+                            updateError = "O pacote não corresponde à versão disponível. Toque em ATUALIZAR para baixar novamente."
+                        } else if (!UpdateFlow.canInstall(this@MainActivity)) {
+                            updateError = if (UpdateFlow.openUnknownSources(this@MainActivity))
+                                "Autorize esta fonte e volte ao OPERIS para tocar em INSTALAR."
+                            else "Abra as configurações do Android e autorize o OPERIS a instalar aplicativos."
+                        } else {
+                            val started = if (useFallback) UpdateFlow.fallback(this@MainActivity, existing)
+                                else withContext(Dispatchers.IO) { UpdateFlow.install(this@MainActivity, existing) }
+                            updateError = if (started) "Conclua a confirmação do Android. Se ela não aparecer, use ABRIR INSTALADOR ALTERNATIVO."
+                                else "Não foi possível abrir a instalação. Use ABRIR INSTALADOR ALTERNATIVO ou tente novamente."
+                        }
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        updateError = "Não foi possível iniciar a instalação. Tente o instalador alternativo."
+                    } finally { validatingUpdate = false }
+                }
                 return
             }
-            if (downloading) return
-            if (!UpdateFlow.canInstall(this@MainActivity)) {
-                UpdateFlow.openUnknownSources(this@MainActivity)
-                return
-            }
-            downloading = true
-            downloadId = policy.downloadUrl?.let { UpdateFlow.enqueue(this@MainActivity, it, policy.latestVersionName) }
+            runCatching {
+                downloadName = policy.latestVersionName
+                downloadHash = policy.sha256
+                downloadVersion = policy.latestVersionCode
+                downloadId = UpdateFlow.enqueue(this@MainActivity, requireNotNull(policy.downloadUrl), downloadName)
+                downloading = true
+            }.onFailure { updateError = "Não foi possível iniciar o download. Verifique a conexão e o armazenamento e tente novamente." }
         }
         LaunchedEffect(identified, online) {
             if (!identified) return@LaunchedEffect
@@ -666,7 +693,8 @@ class MainActivity : ComponentActivity() {
                     installedVersionName = BuildConfig.VERSION_NAME,
                     policy = releasePolicy!!,
                     state = updateUi,
-                    onUpdate = ::updateNow)
+                    onUpdate = { updateNow() },
+                    onFallback = { updateNow(true) })
                 else -> Box(Modifier.fillMaxSize().background(AppInk)) {
                     Column(Modifier.fillMaxSize()) {
                     BrandTopBar(sectionLabel=when(screen){
@@ -739,12 +767,17 @@ class MainActivity : ComponentActivity() {
                             onSound={startActivity(Intent(Settings.ACTION_SOUND_SETTINGS))},
                             onDoNotDisturb={startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS))},
                             onMicrophone={openMicrophonePermission()},
+                            onCamera={openRuntimePermission(Manifest.permission.CAMERA)},
+                            onNetwork={startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))},
+                            onDndMode={runCatching { startActivity(Intent("android.settings.ZEN_MODE_SETTINGS")) }
+                                .onFailure { startActivity(Intent(Settings.ACTION_SOUND_SETTINGS)) }},
                             onBattery={openBatterySettings()},
                             onTest={Alerts.launch(this@MainActivity,Panic(UUID.randomUUID().toString(),selectedTeam?.teamId?:Local.teamId,
                                 "local-test","TESTE LOCAL",System.currentTimeMillis()))},
                             onRetry={retryConnection++},
                             latestRelease=releasePolicy,releaseNote=releaseNote,checkingUpdate=checkingUpdate,
                             onCheckUpdate={scope.launch{refreshRelease(true)}},
+                            onShowUpdate={optionalDismissed=false},
                             onShareRelease={val p=releasePolicy;if(p!=null && p.canDownload())share(ReleaseInfo.shareMessage(p))},
                             onStatus={showStatus=true},statusLabel=Operational.statusLabel(availability,pauseReason),
                             accountEmail=protectedAccountEmail,
@@ -1211,7 +1244,8 @@ class MainActivity : ComponentActivity() {
             installedVersionName = BuildConfig.VERSION_NAME,
             policy = updatePolicy,
             state = updateUi,
-            onUpdate = ::updateNow,
+            onUpdate = { updateNow() },
+            onFallback = { updateNow(true) },
             onLater = { optionalDismissed = true })
         if(releasePending && identified && memberships.isNotEmpty() && panic==null && confirmTeamId==null &&
             !showStatus && inviteAction==null && releaseStatus != ReleaseStatus.REQUIRED)AlertDialog(

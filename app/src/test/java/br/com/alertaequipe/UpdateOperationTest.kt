@@ -54,6 +54,20 @@ class UpdateOperationTest {
         assertFalse(UpdateFlow.installable(null, 15, "br.com.alertaequipe", 14))
     }
 
+    @Test fun candidateMustMatchAdvertisedVersion() {
+        assertTrue(UpdateFlow.installable("app", 36, "app", 35, 36))
+        assertFalse(UpdateFlow.installable("app", 37, "app", 35, 36))
+        assertFalse(UpdateFlow.installable("app", 35, "app", 35, 35))
+        assertFalse(UpdateFlow.installable("other", 36, "app", 35, 36))
+    }
+
+    @Test fun manualCheckAlwaysHasAnExplicitOutcome() {
+        assertEquals("Você está na versão mais recente.", UpdateFlow.checkMessage(ReleaseStatus.UP_TO_DATE, "4.3.0"))
+        assertEquals("Nova versão disponível: 4.4.0.", UpdateFlow.checkMessage(ReleaseStatus.UPDATE_AVAILABLE, "4.4.0"))
+        assertEquals("Nova versão disponível: 4.4.0.", UpdateFlow.checkMessage(ReleaseStatus.REQUIRED, "4.4.0"))
+        assertEquals("Não foi possível verificar agora. Tente novamente.", UpdateFlow.checkMessage(ReleaseStatus.UNKNOWN, ""))
+    }
+
     @Test fun apkSizeFormatting() {
         assertEquals("1.0 MB", UpdateFlow.formatApkSize(1_048_576))
         assertEquals("76.2 MB", UpdateFlow.formatApkSize(79_856_000))
@@ -103,6 +117,8 @@ class UpdateOperationTest {
             val actual = UpdateFlow.sha256(file)
             assertNotNull(actual)
             assertTrue(UpdateFlow.verified(actual, file))
+            assertTrue(UpdateFlow.verified(actual!!.uppercase(java.util.Locale.ROOT), file))
+            assertFalse(UpdateFlow.verified("z".repeat(64), file))
             assertFalse(UpdateFlow.verified(null, file))
         } finally { file.delete() }
     }
