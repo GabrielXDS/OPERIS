@@ -1,126 +1,117 @@
-# Alerta Equipe — MVP Android
+# OPERIS
 
-Aplicativo nativo Kotlin + Jetpack Compose e backend Firebase para equipes privadas de segurança e brigadistas.
+**Comunicação, resposta e registro operacional para equipes de campo.**
 
-**Situação da entrega:** código-fonte do MVP. Para usar entre celulares, é necessário configurar um projeto Firebase, publicar as Functions e as regras, gerar o APK e executar o teste físico descrito em `docs/ACEITACAO.md`. Não há credenciais administrativas no aplicativo. A configuração Firebase real não acompanha este projeto.
+OPERIS é um aplicativo Android desenvolvido em Kotlin e Jetpack Compose para apoiar equipes de Brigada, Vigilância e AGP durante o plantão. O projeto reúne alerta de emergência, rádio PTT, gestão de plantões, ocorrências, rondas, equipes e relatórios em uma única interface.
 
-## O que está implementado
+> Status atual: **piloto interno / desenvolvimento ativo**. O sistema já é utilizado em testes de campo controlados e continua sendo refinado a partir do uso real.
 
-- Cadastro anônimo por instalação, nome amigável e código de ingresso.
-- Identificador `deviceId` igual ao UID do Firebase Authentication. Permanece na instalação; limpar dados/reinstalar cria outra identidade.
-- Tela principal com botão grande e confirmação de acionamento.
-- Backend determina a equipe, identifica o emissor e exclui seu dispositivo.
-- FCM de dados com prioridade alta e validade de 60 segundos.
-- Sirene original incluída em `app/src/main/res/raw/siren.wav`, loop, vibração, AudioFocus e serviço foreground.
-- Notificação de emergência com ação SILENCIAR e tela acessível ao tocar na notificação.
-- Silenciamento estritamente local e limite de dois minutos por alerta.
-- Deduplicação persistente, registro do último alerta, isolamento de equipes.
-- Intervalo de cinco segundos no servidor, envio idempotente e outbox Firestore com repetição em falhas transitórias.
-- Atualização de token com WorkManager, sincronização ao reconectar e verificação periódica.
-- Aviso de notificações/canal/volume/Não Perturbe, configurações e teste somente local.
-- Código de equipe aleatório com expiração, App Check obrigatório, tokens inválidos removidos com proteção contra corrida.
+## Principais funcionalidades
 
-Não há GPS, mapa, câmera, microfone, chat ou painel administrativo.
+- **Sirene de emergência** com notificação prioritária, tela de alerta e ação rápida para silenciar.
+- **Rádio PTT** com canais por função e canal geral, baseado em LiveKit.
+- **Plantões** com identificação de função, postos operacionais e histórico.
+- **Equipes e cargos** para Brigadista, Vigilante, AGP, administrador e criador.
+- **Ocorrências** com descrição, anexos, edição, compartilhamento e auditoria.
+- **Rondas** integradas ao contexto da equipe, com irregularidades e anexos.
+- **Relatório da Brigada** vinculado aos dados do plantão.
+- **Atualização in-app** com validação SHA-256, versão do APK e fallback de instalação.
+- **Diagnóstico do aparelho** para permissões, notificações, câmera, microfone e requisitos operacionais.
+- **Firebase Auth, Firestore, Functions, FCM e App Check** no backend.
 
-## 1. Preparar Firebase
+## Stack
 
-1. O projeto informado é **cirene-9d83e** e já está selecionado em `.firebaserc`. Confira faturamento compatível com Cloud Functions; acompanhe custos e configure alertas de orçamento.
-2. Cadastre um app Android com pacote **br.com.alertaequipe**.
-3. Nas [configurações de cirene-9d83e](https://console.firebase.google.com/project/cirene-9d83e/settings/general), baixe `google-services.json` do aplicativo Android e coloque em `app/google-services.json`. Esse arquivo contém configuração do cliente, não uma credencial administrativa.
-4. Em Authentication, habilite o provedor **Anônimo**.
-5. Crie o Cloud Firestore; escolha a localização antes de criar. As Functions usam **southamerica-east1**.
-6. Configure App Check. Debug usa Debug Provider; obtenha o token de depuração no Logcat e cadastre-o no console. Nunca use debug tokens em release.
-7. Release usa Play Integrity: configure o app, certificado SHA-256 e as políticas adequadas à distribuição. Para APK instalado fora do Google Play, revise os requisitos de reconhecimento/licenciamento do App Check; valide o APK assinado em aparelhos reais. Não remova App Check para contornar uma falha.
-8. Instale Node.js 22 e Firebase CLI, faça `firebase login`.
+- Kotlin + Jetpack Compose
+- Android SDK 35 / minSdk 26
+- Firebase Authentication
+- Cloud Firestore
+- Firebase Cloud Messaging
+- Cloud Functions v2 / Node.js 22
+- Firebase App Check
+- WorkManager + Foreground Services
+- LiveKit para PTT
+- Coil para imagens
+## Arquitetura resumida
 
-Na raiz do projeto:
+```text
+Android / OPERIS
+      |
+      +-- Firebase Auth
+      +-- Cloud Functions ---- Firestore
+      +-- FCM ---------------- Alertas / notificações
+      +-- Storage ------------ Anexos / releases
+      +-- LiveKit ------------ Rádio PTT
+```
+
+O aplicativo não incorpora credenciais administrativas. Chaves privadas, secrets de infraestrutura, keystores e arquivos de ambiente ficam fora do repositório.
+
+### Rádio no ambiente interno
+
+Durante o piloto interno, o servidor LiveKit é self-hosted e acessado por rede privada. Essa configuração reduz custos durante desenvolvimento e testes. A arquitetura permite substituir esse endpoint por infraestrutura pública futuramente sem reescrever o módulo principal de rádio.
+
+## Fluxo operacional
+
+1. O usuário instala o OPERIS e prepara as permissões do aparelho.
+2. Entra em uma equipe por convite e recebe sua função operacional.
+3. Assume o plantão e, quando aplicável, seleciona ou confirma seu posto.
+4. Durante o serviço pode usar Rádio, Sirene, Ocorrências e Rondas.
+5. A Brigada acompanha e compartilha o relatório do plantão.
+6. Novas versões podem ser distribuídas pelo atualizador interno do próprio app.
+
+## Estado do projeto
+
+A versão atual registrada neste repositório é **4.3.1 (versionCode 36)**. Essa versão reforçou o fluxo de atualização e a preparação do aparelho para uso em campo.
+## Build local
+
+Requisitos principais:
+
+- JDK 17
+- Android Studio compatível com AGP 8.9.2
+- Android SDK 35
+- Node.js 22 para o backend
+- arquivo `app/google-services.json` do seu próprio projeto Firebase
+
+Build Android de piloto:
+
+```powershell
+.\gradlew.bat testPilotUnitTest assemblePilot
+```
+
+Testes do backend:
 
 ```powershell
 Set-Location backend
 npm install
 npm test
-Set-Location ..
-firebase use cirene-9d83e
-firebase deploy --only firestore:rules,firestore:indexes,functions
 ```
 
-A implantação ocorre somente quando você executar esses comandos em seu projeto.
+## Segurança
 
-## 2. Criar uma equipe
+Este repositório ignora arquivos sensíveis e artefatos locais, incluindo `google-services.json`, `.env`, keystores, secrets do LiveKit, APKs e backups. Nunca publique chaves privadas, senhas de assinatura ou credenciais administrativas.
 
-O código de ingresso não é o teamId. Ele é um segredo aleatório de 48 caracteres hexadecimais, válido por sete dias. Somente seu hash é salvo no Firestore. Compartilhe pelo canal privado da equipe.
+O projeto usa autenticação, App Check, validação de participação em equipe e regras de autorização no backend. Mesmo assim, trata-se de um software em desenvolvimento e não deve ser considerado um sistema certificado para operações críticas.
+## Próximos passos
 
-Em ambiente administrativo com Application Default Credentials, por exemplo após `gcloud auth application-default login`, configure seu projeto no ambiente e execute:
+- encerramento automático do plantão às 07:00;
+- compartilhamento do Relatório da Brigada durante o plantão;
+- simplificação das telas a partir do uso em campo;
+- melhoria contínua de Ocorrências e Rondas;
+- suporte experimental a usuários iOS por interface web/PWA;
+- redução gradual de acoplamento e melhoria da cobertura de testes;
+- infraestrutura pública para o rádio somente se o projeto exigir no futuro.
 
-```powershell
-$env:GOOGLE_CLOUD_PROJECT="cirene-9d83e"
-Set-Location backend
-node scripts/create-team.mjs equipe_unip_01
-```
+## Estrutura do repositório
 
-O script imprime o código. Execute novamente para gerar outro convite. Desative o convite antigo em `invites/{hash}` quando necessário. A equipe tem limite de 100 aparelhos neste MVP. Convites são reutilizáveis dentro do prazo; não são códigos de uso único.
+- `app/` — aplicativo Android.
+- `backend/` — Cloud Functions e regras de domínio do servidor.
+- `docs/` — documentação técnica e operacional.
+- `firestore.rules` / `storage.rules` — regras de segurança.
+- `CHANGELOG.md` — histórico resumido das versões.
 
-Não copie chaves de conta de serviço para o aplicativo, repositório ou APK. Credenciais ADC são utilizadas somente nos scripts administrativos.
+## Histórico
 
-Para revogar um dispositivo:
+Consulte [CHANGELOG.md](CHANGELOG.md) para acompanhar as alterações por versão.
 
-```powershell
-node scripts/revoke-device.mjs UID_DO_DISPOSITIVO
-```
+---
 
-## 3. Abrir e gerar APK
-
-Requisitos: Android Studio com suporte a AGP 8.9.2, **JDK 17**, Android SDK Platform 35 e Build Tools 35.0.0. O Gradle Wrapper é 8.11.1 e verifica o SHA-256 da distribuição. Android mínimo: 8.0/API 26, com Google Play services.
-
-1. Abra esta pasta no Android Studio.
-2. Selecione JDK 17 em Settings > Build Tools > Gradle.
-3. Instale SDK 35 pelo SDK Manager.
-4. Adicione o `app/google-services.json` real.
-5. Aguarde o Gradle Sync e execute em um aparelho, ou:
-
-```powershell
-.\gradlew.bat :app:assembleDebug
-```
-
-Saída: `app/build/outputs/apk/debug/app-debug.apk`.
-
-Para distribuição, use **Build > Generate Signed App Bundle / APK > APK**, crie/guarde um keystore particular e configure SHA-256/App Check para essa assinatura. O build release não contém debug provider. Não distribua debug APK como versão operacional.
-
-No primeiro acesso, digite nome e código, conceda notificações e execute TESTAR SIRENE. Faça isso em cada aparelho.
-
-## 4. Comportamento e limites
-
-**“Alerta enviado” significa que o backend aceitou a solicitação. Não confirma que todos os celulares tocaram.** `acceptedByFcm` também não é comprovante de entrega. O MVP não implementa confirmação individual de recepção.
-
-- “Sistema conectado” exige internet validada pelo Android e uma sincronização recente bem-sucedida com o backend; não é garantia de entrega futura.
-- FCM não garante entrega instantânea. Rede, Doze, restrições do fabricante, bateria, notificações bloqueadas e Não Perturbe podem impedir/atrasar a recepção.
-- Alertas com mais de 60 segundos são descartados para não produzir uma emergência antiga ao reconectar. Relógios dos aparelhos devem estar sincronizados.
-- O Android pode reduzir a prioridade do FCM e impedir iniciar foreground service em background. Nesse caso há uma notificação sonora de fallback, quando permitida, e opção de ativar a sirene ao abrir.
-- A Activity não é aberta à força. Não se pede permissão de tela cheia: este app não deve se fazer passar por um discador ou despertador. A tela de emergência aparece quando o app está aberto ou o usuário toca na notificação.
-- O áudio usa o volume de **alarme**, respeita AudioFocus e não altera volume/Não Perturbe. O acesso a Não Perturbe é apresentado nas configurações, sem modificar a política do sistema.
-- Perda de foco de áudio pode pausar a sirene. Teste chamadas e outros apps de áudio em cada modelo.
-- Após reiniciar, FCM/WorkManager seguem seus mecanismos oficiais; não se inicia sirene no boot. Desbloqueie o aparelho antes de esperar recepção. Não há suporte a Direct Boot.
-- Depois de “Forçar parada”, o usuário precisa abrir o app novamente. Não há tentativa de contornar isso.
-- Um novo alerta substitui a identificação exibida e renova o limite de dois minutos. SILENCIAR interrompe todos os sons de emergência ativos somente naquele aparelho.
-- Limpar dados/reinstalar cria nova identidade. Revogue o cadastro anterior.
-- Não há histórico completo no app: mantém apenas último alerta e IDs recentes para deduplicação.
-
-Use o roteiro físico antes de uso operacional; os testes de código não validam áudio/entrega em celulares.
-
-## Organização
-
-- `app/`: aplicativo Android.
-- `backend/src/index.js`: cadastro, sincronização, disparo e distribuição.
-- `backend/src/policy.js`: validação, destinatários, cooldown e validade.
-- `backend/scripts/`: provisionamento/revogação.
-- `firestore.rules`: clientes sem acesso direto; operações via backend.
-- `docs/ARQUITETURA.md`: fluxo, dados e decisões.
-- `docs/ACEITACAO.md`: testes físicos e segurança.
-- `docs/VERIFICACAO.md`: verificações realizadas nesta entrega.
-
-## Referências oficiais
-
-- [Prioridade e possíveis restrições FCM](https://firebase.google.com/docs/cloud-messaging/android-message-priority)
-- [Início de foreground services](https://developer.android.com/develop/background-work/services/fgs/launch)
-- [Tipos de foreground service](https://developer.android.com/develop/background-work/services/fgs/service-types)
-- [App Check com Play Integrity](https://firebase.google.com/docs/app-check/android/play-integrity-provider)
+Projeto desenvolvido como solução interna, laboratório de engenharia de software e peça de portfólio, com evolução orientada por testes em aparelhos reais.
