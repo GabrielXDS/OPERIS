@@ -136,11 +136,13 @@ class MainActivity : ComponentActivity() {
         var releaseNote by remember { mutableStateOf("") }
         var checkingUpdate by remember { mutableStateOf(false) }
         var optionalDismissed by rememberSaveable { mutableStateOf(false) }
-        var downloading by rememberSaveable { mutableStateOf(false) }
-        var downloadId by rememberSaveable { mutableStateOf<Long?>(null) }
-        var downloadName by rememberSaveable { mutableStateOf("") }
-        var downloadHash by rememberSaveable { mutableStateOf<String?>(null) }
-        var downloadVersion by rememberSaveable { mutableStateOf(0) }
+        val pendingDownload = remember { Local.prefs.getInt("ota.version", 0) > BuildConfig.VERSION_CODE && Local.prefs.contains("ota.id") }
+        var downloading by rememberSaveable { mutableStateOf(pendingDownload) }
+        var downloadId by rememberSaveable { mutableStateOf<Long?>(if (pendingDownload) Local.prefs.getLong("ota.id", 0) else null) }
+        var downloadName by rememberSaveable { mutableStateOf(if (pendingDownload) Local.prefs.getString("ota.name", "").orEmpty() else "") }
+        var downloadHash by rememberSaveable { mutableStateOf<String?>(if (pendingDownload) Local.prefs.getString("ota.hash", null) else null) }
+        var downloadVersion by rememberSaveable { mutableStateOf(if (pendingDownload) Local.prefs.getInt("ota.version", 0) else 0) }
+        var downloadSize by rememberSaveable { mutableStateOf(if (pendingDownload) Local.prefs.getLong("ota.size", 0) else 0L) }
         var apkPath by rememberSaveable { mutableStateOf<String?>(null) }
         var validatingUpdate by remember { mutableStateOf(false) }
         var updateError by remember { mutableStateOf<String?>(null) }
@@ -318,23 +320,30 @@ class MainActivity : ComponentActivity() {
             if (checkingUpdate) return
             checkingUpdate = true
             try {
+                android.util.Log.i("OperisUpdater", "stage=release result=start")
+                val networkManager = getSystemService(ConnectivityManager::class.java)
+                if (networkManager.activeNetwork == null) throw UpdateRequestException(
+                    UpdateFailure("NO_NETWORK", "O aparelho está sem rede. Conecte-se ao Wi-Fi ou ative os dados móveis."))
                 val fetched = Backend.getAndroidRelease()
                 val stamped = fetched.copy(cachedAtMs = System.currentTimeMillis())
                 releasePolicy = stamped
                 teamPreferences.saveReleasePolicy(stamped)
                 releaseStatus = Operational.classifyRelease(BuildConfig.VERSION_CODE, stamped)
+                android.util.Log.i("OperisUpdater", "stage=release result=$releaseStatus installed=${BuildConfig.VERSION_CODE} advertised=${stamped.latestVersionCode}")
                 if (userInitiated) {
                     releaseNote = UpdateFlow.checkMessage(releaseStatus, stamped.latestVersionName)
                     optionalDismissed = false
                 }
             } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                if (userInitiated) releaseNote = UpdateFlow.checkMessage(ReleaseStatus.UNKNOWN, "")
+                if (e is kotlinx.coroutines.CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException) throw e
+                val failure = UpdateDiagnostics.describe(e)
+                android.util.Log.w("OperisUpdater", "stage=release code=${failure.code}")
+                releaseNote = failure.message
             } finally { checkingUpdate = false }
         }
-        suspend fun validCandidate(file: File, hash: String?, version: Int): Boolean = withContext(Dispatchers.IO) {
-            UpdateFlow.verified(hash, file) && UpdateFlow.inspect(this@MainActivity, file)?.let { i ->
-                UpdateFlow.installable(i.packageName, i.versionCode, BuildConfig.APPLICATION_ID, BuildConfig.VERSION_CODE, version)
+        suspend fun validCandidate(file: File, hash: String?, version: Int, size: Long? = releasePolicy?.apkSize): Boolean = withContext(Dispatchers.IO) {
+            file.length() == size && UpdateFlow.verified(hash, file) && UpdateFlow.inspect(this@MainActivity, file)?.let { i ->
+                UpdateFlow.installable(i.packageName, i.versionCode, BuildConfig.APPLICATION_ID, BuildConfig.VERSION_CODE, version) && UpdateFlow.sameSignature(this@MainActivity, i)
             } == true
         }
         fun onDownloadComplete(id: Long) {
@@ -344,18 +353,25 @@ class MainActivity : ComponentActivity() {
                 try {
                     val file = UpdateFlow.downloadedFile(this@MainActivity, downloadName)
                     if (UpdateFlow.queryStatus(this@MainActivity, id) == DownloadManager.STATUS_SUCCESSFUL &&
-                        validCandidate(file, downloadHash, downloadVersion)) {
+                        validCandidate(file, downloadHash, downloadVersion, downloadSize)) {
                         apkPath = file.absolutePath
                         updateError = null
+                        android.util.Log.i("OperisUpdater", "stage=apk_validation result=success")
                     } else {
+                        Local.prefs.edit().remove("ota.id").apply()
                         file.delete(); apkPath = null
-                        updateError = "O download falhou ou o pacote não corresponde à atualização. Tente novamente."
+                        val failure = if (UpdateFlow.queryStatus(this@MainActivity, id) == DownloadManager.STATUS_FAILED)
+                            UpdateFlow.queryFailure(this@MainActivity, id)
+                        else UpdateFailure("APK_VALIDATION", "O APK não corresponde ao tamanho, assinatura, versão ou hash publicados. Baixe novamente.")
+                        android.util.Log.w("OperisUpdater", "stage=download code=${failure.code}")
+                        updateError = failure.message
                     }
                     downloadId = null
                     downloading = false
                 } catch (e: Exception) {
                     if (e is kotlinx.coroutines.CancellationException) throw e
                     updateError = "Não foi possível validar o download. Tente novamente."
+                    Local.prefs.edit().remove("ota.id").apply()
                     downloadId = null; downloading = false; apkPath = null
                 } finally { validatingUpdate = false }
             }
@@ -390,18 +406,31 @@ class MainActivity : ComponentActivity() {
                 }
                 return
             }
-            runCatching {
+            downloading = true
+            scope.launch {
+              try {
+                UpdateDiagnostics.checkApk(requireNotNull(policy.downloadUrl))
                 downloadName = policy.latestVersionName
                 downloadHash = policy.sha256
                 downloadVersion = policy.latestVersionCode
+                downloadSize = requireNotNull(policy.apkSize)
                 downloadId = UpdateFlow.enqueue(this@MainActivity, requireNotNull(policy.downloadUrl), downloadName)
+                Local.prefs.edit().putLong("ota.id", requireNotNull(downloadId)).putString("ota.name", downloadName)
+                    .putString("ota.hash", downloadHash).putInt("ota.version", downloadVersion).putLong("ota.size", downloadSize).apply()
+                android.util.Log.i("OperisUpdater", "stage=download result=started")
                 downloading = true
-            }.onFailure { updateError = "Não foi possível iniciar o download. Verifique a conexão e o armazenamento e tente novamente." }
+              } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                val failure = UpdateDiagnostics.describe(e)
+                android.util.Log.w("OperisUpdater", "stage=download_start code=${failure.code}")
+                updateError = failure.message
+                downloading = false
+              }
+            }
         }
         LaunchedEffect(identified, online) {
             if (!identified) return@LaunchedEffect
-            if (online) refreshRelease()
-            else if (releaseStatus == ReleaseStatus.UNKNOWN) releaseNote = "Sem conexão: não foi possível verificar atualizações."
+            refreshRelease()
         }
 
         DownloadCompletionMonitor(downloadId, onComplete = ::onDownloadComplete)

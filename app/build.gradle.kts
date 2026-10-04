@@ -11,8 +11,8 @@ android {
         applicationId = "br.com.alertaequipe"
         minSdk = 26
         targetSdk = 35
-        versionCode = 37
-        versionName = "4.3.2"
+        versionCode = 39
+        versionName = "4.3.3"
         buildConfigField("boolean", "SELF_HOSTED_PTT_LAB", "false")
         manifestPlaceholders["usesCleartextTraffic"] = "false"
     }
@@ -81,4 +81,3 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2")
     implementation("io.livekit:livekit-android:2.29.0")
 }
-

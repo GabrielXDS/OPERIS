@@ -12,6 +12,7 @@ class UpdateOperationTest {
         downloadUrl = "https://example.com/operis.apk",
         releaseNotes = listOf("Nota"),
         sha256 = "a".repeat(64),
+        apkSize = 1024,
         cachedAtMs = now
     )
 

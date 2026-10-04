@@ -42,6 +42,7 @@ internal object UpdatePackageInstaller {
             }
             true
         }.getOrElse {
+            android.util.Log.w("OperisUpdater", "stage=installer code=SESSION_FAILED")
             // A failed copy/commit must not leave a staged APK consuming device storage.
             pendingSessionId?.let { id -> runCatching { context.packageManager.packageInstaller.abandonSession(id) } }
             false
@@ -51,14 +52,22 @@ internal object UpdatePackageInstaller {
 
 class UpdateInstallReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        when (intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)) {
+        val status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE)
+        android.util.Log.i("OperisUpdater", "stage=installer status=$status")
+        when (status) {
             PackageInstaller.STATUS_PENDING_USER_ACTION -> openConfirmation(context, intent)
             PackageInstaller.STATUS_SUCCESS ->
                 Toast.makeText(context, "OPERIS atualizado com sucesso.", Toast.LENGTH_LONG).show()
             else -> {
-                val detail = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty()
-                val message = if (detail.isBlank()) "Não foi possível instalar a atualização."
-                    else "Falha ao instalar a atualização: $detail"
+                val message = when (status) {
+                    PackageInstaller.STATUS_FAILURE_STORAGE -> "Não há espaço suficiente para instalar a atualização."
+                    PackageInstaller.STATUS_FAILURE_CONFLICT -> "A assinatura ou versão do APK conflita com a instalação atual."
+                    PackageInstaller.STATUS_FAILURE_BLOCKED -> "O Android bloqueou a instalação. Verifique a autorização para instalar pelo OPERIS."
+                    PackageInstaller.STATUS_FAILURE_ABORTED -> "Instalação cancelada. Você pode tentar novamente pelo OPERIS."
+                    PackageInstaller.STATUS_FAILURE_INVALID -> "O Android rejeitou o pacote de atualização. Baixe novamente."
+                    PackageInstaller.STATUS_FAILURE_INCOMPATIBLE -> "O pacote de atualização não é compatível com este aparelho."
+                    else -> "Não foi possível instalar a atualização. Tente novamente pelo OPERIS."
+                }
                 Toast.makeText(context, message, Toast.LENGTH_LONG).show()
             }
         }

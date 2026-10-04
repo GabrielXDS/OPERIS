@@ -41,7 +41,7 @@ data class InvitePreview(val code: String, val teamId: String, val teamName: Str
 data class TeamAccount(val teams: List<TeamMembership>, val availability: String, val pauseReason: String?,
     val requests: List<MyRequest> = emptyList())
 
-enum class ReleaseStatus { UNKNOWN, UP_TO_DATE, UPDATE_AVAILABLE, REQUIRED }
+enum class ReleaseStatus { UNKNOWN, UP_TO_DATE, NEWER_THAN_PUBLISHED, UPDATE_AVAILABLE, REQUIRED }
 
 enum class ReleasePolicyStatus { DRAFT, ANNOUNCED, PUBLISHED }
 
@@ -108,9 +108,11 @@ object Operational {
     fun classifyRelease(currentVersionCode: Int, policy: ReleasePolicy?, now: Long = System.currentTimeMillis()): ReleaseStatus {
         if (policy == null || !policy.valid(now)) return ReleaseStatus.UNKNOWN
         return when {
-            currentVersionCode >= policy.latestVersionCode -> ReleaseStatus.UP_TO_DATE
             // Rascunhos/anúncios não oferecem download nem bloqueiam versões antigas.
             policy.status != ReleasePolicyStatus.PUBLISHED -> ReleaseStatus.UNKNOWN
+            currentVersionCode > policy.latestVersionCode -> ReleaseStatus.NEWER_THAN_PUBLISHED
+            currentVersionCode == policy.latestVersionCode -> ReleaseStatus.UP_TO_DATE
+            !policy.canDownload() -> ReleaseStatus.UNKNOWN
             currentVersionCode < policy.minSupportedVersionCode -> ReleaseStatus.REQUIRED
             else -> ReleaseStatus.UPDATE_AVAILABLE
         }
@@ -198,10 +200,10 @@ object ReleaseInfo {
     // Local fallback notes for offline "novidades" and settings. The server policy, when present,
     // is the source of truth for release notes and the download package.
     val releaseNotes = listOf(
-        "Sirene de emergência agora pode abrir em tela cheia sobre a tela bloqueada quando autorizado pelo Android",
-        "Botão SILENCIAR disponível na tela de emergência e na notificação da tela bloqueada",
-        "Diagnóstico orienta a liberar a permissão de alertas em tela cheia no Android 14 ou superior",
-        "Proprietários e administradores agora podem remover integrantes da equipe com confirmação e regras de segurança"
+        "Consulta de atualização sem depender da validação de Internet do Android",
+        "Mensagens específicas para DNS, tempo de resposta, acesso negado e APK não encontrado",
+        "Verificação do tamanho, hash, versão e assinatura do APK antes da instalação",
+        "Rascunhos de release não são mais apresentados como versão mais recente"
     )
     fun validDownload(url: String): Boolean = runCatching {
         val uri = URI(url)

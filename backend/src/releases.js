@@ -89,7 +89,20 @@ export function releaseOperations(db) {
       requireUid(req);
       try {
         const snap = await policyRef.get();
-        return normalize(snap.exists ? snap.data() : null);
+        if (!snap.exists) {
+          throw new HttpsError("not-found", "Release não cadastrada.", {reason: "RELEASE_NOT_FOUND"});
+        }
+        const data = snap.data();
+        if (!Number.isInteger(data.latestVersionCode) || data.latestVersionCode < 1 ||
+            typeof data.latestVersionName !== "string" || !data.latestVersionName.trim()) {
+          throw new HttpsError("failed-precondition", "Release inválida.", {reason: "RELEASE_INVALID"});
+        }
+        const policy = normalize(data);
+        if (policy.status === PUBLISHED_STATUS && (!policy.downloadUrl || !policy.sha256 || !policy.apkSize ||
+            !Array.isArray(data.releaseNotes) || !safeNotes(data.releaseNotes, []).length)) {
+          throw new HttpsError("failed-precondition", "Pacote da release incompleto.", {reason: "RELEASE_INVALID"});
+        }
+        return policy;
       } catch (e) {
         if (e instanceof HttpsError) throw e;
         throw new HttpsError("internal", "Não foi possível consultar a política de atualização.");

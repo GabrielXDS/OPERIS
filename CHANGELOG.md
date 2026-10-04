@@ -2,6 +2,14 @@
 
 Todas as mudanças relevantes do OPERIS são registradas aqui de forma resumida.
 
+## [4.3.3] - 2026-10-04
+
+- Android: versionCode 39; mesmo applicationId e certificado do APK piloto 4.3.2/code 37.
+- Updater consulta o servidor sem depender da validação de Internet do Android e distingue versão instalada superior à publicada, sem oferecer downgrade.
+- Diagnóstico de DNS, timeout, autenticação, App Check, HTTP do APK, armazenamento e instalação; logs sem tokens ou identificadores de usuário.
+- Verificação de tamanho, SHA-256, pacote, versão e assinatura; recuperação de downloads após encerramento do processo.
+- Backend local rejeita documento de release inexistente ou incompleto; sua implantação é separada da publicação do APK.
+
 ## [4.3.2] - 2026-10-01
 
 ### Plantão

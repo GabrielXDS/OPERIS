@@ -60,7 +60,7 @@ data class UpdateUiState(
 )
 
 /** Identidade lida do próprio APK baixado (pacote e versão, sem instalar). */
-data class ApkInspect(val packageName: String, val versionCode: Int)
+data class ApkInspect(val packageName: String, val versionCode: Int, val certificates: Set<String> = emptySet())
 
 /** Download, SHA-256 validation and install plumbing (pure logic kept testable). */
 object UpdateFlow {
@@ -89,17 +89,32 @@ object UpdateFlow {
 
     fun checkMessage(status: ReleaseStatus, versionName: String): String = when (status) {
         ReleaseStatus.UP_TO_DATE -> "Você está na versão mais recente."
+        ReleaseStatus.NEWER_THAN_PUBLISHED -> "Você está em uma versão mais recente que a versão atualmente publicada."
         ReleaseStatus.UPDATE_AVAILABLE, ReleaseStatus.REQUIRED -> "Nova versão disponível: $versionName."
         ReleaseStatus.UNKNOWN -> "Não foi possível verificar agora. Tente novamente."
     }
     /** Lê packageName/versionCode do APK baixado através do PackageManager (sem instalar). */
     @Suppress("DEPRECATION")
     fun inspect(context: Context, file: File): ApkInspect? = runCatching {
-        val info = context.packageManager.getPackageArchiveInfo(file.absolutePath, 0) ?: return null
+        val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        val info = context.packageManager.getPackageArchiveInfo(file.absolutePath, flags) ?: return null
         val pkg = info.applicationInfo?.packageName ?: info.packageName
         val version = if (Build.VERSION.SDK_INT >= 28) info.longVersionCode.toInt() else info.versionCode
-        ApkInspect(pkg, version)
+        ApkInspect(pkg, version, certificates(info))
     }.getOrNull()
+    @Suppress("DEPRECATION")
+    private fun certificates(info: android.content.pm.PackageInfo): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= 28) info.signingInfo?.apkContentsSigners else info.signatures
+        return signatures.orEmpty().map { signature ->
+            java.security.MessageDigest.getInstance("SHA-256").digest(signature.toByteArray()).joinToString("") { "%02x".format(it) }
+        }.toSet()
+    }
+    fun signaturesMatch(candidate: Set<String>, installed: Set<String>): Boolean = candidate.isNotEmpty() && candidate == installed
+    @Suppress("DEPRECATION")
+    fun sameSignature(context: Context, candidate: ApkInspect): Boolean = runCatching {
+        val flags = if (Build.VERSION.SDK_INT >= 28) PackageManager.GET_SIGNING_CERTIFICATES else PackageManager.GET_SIGNATURES
+        signaturesMatch(candidate.certificates, certificates(context.packageManager.getPackageInfo(context.packageName, flags)))
+    }.getOrDefault(false)
     fun formatApkSize(bytes: Long): String = when {
         bytes >= 1_048_576 -> String.format(java.util.Locale.ROOT, "%.1f MB", bytes / 1_048_576.0)
         bytes >= 1024 -> "%.0f KB".format(bytes / 1024.0)
@@ -111,6 +126,7 @@ object UpdateFlow {
         val destination = downloadedFile(context, versionName)
         check(!destination.exists() || destination.delete()) { "Não foi possível substituir o download anterior." }
         val request = DownloadManager.Request(Uri.parse(url))
+            .setAllowedOverMetered(true)
             .setTitle("OPERIS $versionName")
             .setDescription("Baixando a atualização do OPERIS")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
@@ -126,6 +142,13 @@ object UpdateFlow {
         return cursor.use {
             if (cursor.moveToFirst()) cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
             else DownloadManager.STATUS_FAILED
+        }
+    }
+    fun queryFailure(context: Context, downloadId: Long): UpdateFailure {
+        val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
+        return manager.query(DownloadManager.Query().setFilterById(downloadId)).use { cursor ->
+            val reason = if (cursor.moveToFirst()) cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON)) else 0
+            UpdateDiagnostics.download(reason)
         }
     }
     fun canInstall(context: Context): Boolean = context.packageManager.canRequestPackageInstalls()

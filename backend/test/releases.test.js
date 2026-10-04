@@ -24,18 +24,9 @@ const valid = {
 
 const SHIPPED_KEYS = ["apkSize", "downloadUrl", "latestVersionCode", "latestVersionName", "minSupportedVersionCode", "releaseNotes", "sha256", "status"];
 
-test("releases: missing doc returns shipped defaults (8 fields)", async () => {
+test("releases: missing document never reports an obsolete shipped version", async () => {
   const {ops} = fixture();
-  const out = await ops.getRelease(req());
-  assert.deepEqual(Object.keys(out).sort(), SHIPPED_KEYS);
-  assert.equal(out.latestVersionCode, 15);
-  assert.equal(out.latestVersionName, "4.0");
-  assert.equal(out.minSupportedVersionCode, 9);
-  assert.equal(out.status, "DRAFT");
-  assert.equal(out.downloadUrl, null);
-  assert.equal(out.sha256, null);
-  assert.equal(out.apkSize, null);
-  assert.ok(out.releaseNotes.length > 0);
+  await assert.rejects(ops.getRelease(req()), e => e.code === "not-found" && e.details.reason === "RELEASE_NOT_FOUND");
 });
 
 test("releases: uses admin-edited doc and normalizes fields", async () => {
@@ -68,11 +59,11 @@ test("releases: non-PUBLISHED statuses pass through and unknown status falls bac
 
 test("releases: apkSize is a positive integer or null", async () => {
   const {ops} = fixture({...valid, apkSize: 0});
-  assert.equal((await ops.getRelease(req())).apkSize, null);
+  await assert.rejects(ops.getRelease(req()), e => e.code === "failed-precondition");
   const {ops: floatOps} = fixture({...valid, apkSize: 12.5});
-  assert.equal((await floatOps.getRelease(req())).apkSize, null);
+  await assert.rejects(floatOps.getRelease(req()), e => e.code === "failed-precondition");
   const {ops: strOps} = fixture({...valid, apkSize: "100"});
-  assert.equal((await strOps.getRelease(req())).apkSize, null);
+  await assert.rejects(strOps.getRelease(req()), e => e.code === "failed-precondition");
 });
 
 test("releases: clamps minSupportedVersionCode above latest", async () => {
@@ -90,19 +81,13 @@ test("releases: rejects incoherent fields field-by-field", async () => {
     releaseNotes: [],
     sha256: "zz:.!",
   });
-  const out = await ops.getRelease(req());
-  assert.equal(out.latestVersionCode, 15);
-  assert.equal(out.latestVersionName, "4.0");
-  assert.equal(out.minSupportedVersionCode, 15);
-  assert.equal(out.downloadUrl, null);
-  assert.equal(out.sha256, null);
-  assert.ok(out.releaseNotes.length > 0);
+  await assert.rejects(ops.getRelease(req()), e => e.code === "failed-precondition" && e.details.reason === "RELEASE_INVALID");
 });
 
 test("releases: https download URL forbids credentials, query and fragment", async () => {
   for (const bad of ["https://user@example.com/a", "https://example.com/a?b=c", "https://example.com/a#f", "ftp://example.com/a", "https://"]) {
     const {ops} = fixture({...valid, downloadUrl: bad});
-    assert.equal((await ops.getRelease(req())).downloadUrl, null, bad);
+    await assert.rejects(ops.getRelease(req()), e => e.code === "failed-precondition", bad);
   }
   const {ops: okOps} = fixture({...valid, downloadUrl: "https://example.com/operis-0.3.7.apk"});
   assert.notEqual((await okOps.getRelease(req())).downloadUrl, null);
@@ -112,7 +97,7 @@ test("releases: sha256 normalized to lowercase hex or null", async () => {
   const {ops} = fixture({...valid, sha256: "ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef0123456789"});
   assert.equal((await ops.getRelease(req())).sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
   const {ops: nullOps} = fixture({...valid, sha256: "short"});
-  assert.equal((await nullOps.getRelease(req())).sha256, null);
+  await assert.rejects(nullOps.getRelease(req()), e => e.code === "failed-precondition");
 });
 
 test("releases: notes are trimmed, non-empty and bounded", async () => {
